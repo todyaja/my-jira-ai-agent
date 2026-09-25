@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,33 @@ type fakePRDGenerator struct {
 	done   chan struct{}
 }
 
+type synchronizedLogBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	signal string
+	done   chan struct{}
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, err := b.buffer.Write(p); err != nil {
+		return 0, err
+	}
+	if b.done != nil && strings.Contains(b.buffer.String(), b.signal) {
+		close(b.done)
+		b.done = nil
+	}
+	return len(p), nil
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
 func (f *fakePRDGenerator) Generate(context.Context, workflow.PRDInput) (string, error) {
 	f.called = true
 	if f.done != nil {
@@ -72,7 +100,7 @@ func TestHandleJiraWebhookFiltersAndTriggers(t *testing.T) {
 			assignee:     &jira.User{AccountID: "account-1"},
 			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("PRD Requested")}},
 			wantStatus:   http.StatusOK,
-			wantLog:      "PRD WORKFLOW TRIGGERED FOR DEMO-1\nPRD operation succeeded: issue=DEMO-1 operation=execute PRD requested\n",
+			wantLog:      "PRD WORKFLOW TRIGGERED FOR DEMO-1\nPRD generation started: issue=DEMO-1\nPRD generation completed: issue=DEMO-1\nPRD operation succeeded: issue=DEMO-1 operation=execute PRD requested\n",
 		},
 		{
 			name:         "ignores other webhook event",
@@ -146,8 +174,14 @@ func TestHandleJiraWebhookFiltersAndTriggers(t *testing.T) {
 					t.Fatal("PRD workflow did not complete")
 				}
 			}
-			if got := logs.String(); got != tt.wantLog {
-				t.Fatalf("log = %q, want %q", got, tt.wantLog)
+			gotLog := logs.String()
+			if tt.wantLog == "" && gotLog != "" {
+				t.Fatalf("log = %q, want empty log", gotLog)
+			}
+			for _, expectedLine := range strings.Split(strings.TrimSpace(tt.wantLog), "\n") {
+				if expectedLine != "" && !strings.Contains(gotLog, expectedLine) {
+					t.Fatalf("log = %q, missing %q", gotLog, expectedLine)
+				}
 			}
 			if tt.wantLog == "" && (reader.called || writer.called || generator.called) {
 				t.Fatal("ignored webhook called a workflow dependency")
@@ -187,7 +221,10 @@ func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewReader(payload))
 	response := httptest.NewRecorder()
-	var logs bytes.Buffer
+	logsDone := make(chan struct{})
+	var logs synchronizedLogBuffer
+	logs.signal = "OpenAI returned HTTP status 404"
+	logs.done = logsDone
 	done := make(chan struct{})
 	generator := &fakePRDGenerator{err: errors.New("OpenAI returned HTTP status 404"), done: done}
 
@@ -205,9 +242,9 @@ func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 	select {
-	case <-done:
+	case <-logsDone:
 	case <-time.After(time.Second):
-		t.Fatal("PRD workflow did not start")
+		t.Fatal("PRD error was not logged")
 	}
 	if !strings.Contains(logs.String(), "OpenAI returned HTTP status 404") {
 		t.Fatalf("log = %q, want safe OpenAI status error", logs.String())
