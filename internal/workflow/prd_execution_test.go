@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"strings"
@@ -26,11 +27,11 @@ type issueWriterFake struct {
 	updateErr     error
 	transitionErr error
 	order         *[]string
-	description   string
+	description   json.RawMessage
 	status        string
 }
 
-func (f *issueWriterFake) UpdateDescription(_ context.Context, _ string, description string) error {
+func (f *issueWriterFake) UpdateDescription(_ context.Context, _ string, description json.RawMessage) error {
 	*f.order = append(*f.order, "update description")
 	f.description = description
 	if f.updateErr != nil {
@@ -65,9 +66,10 @@ func TestExecutePRDRequestedRunsOperationsInOrder(t *testing.T) {
 	order := []string{}
 	reader := &issueReaderFake{
 		issue: jira.Issue{
-			Key:         "ABC-1",
-			Summary:     "Build a feature",
-			Description: "Human description\nPRD\n=============\nold PRD",
+			Key:            "ABC-1",
+			Summary:        "Build a feature",
+			Description:    "Human description\nPRD\n=============\nold PRD",
+			DescriptionADF: json.RawMessage(`{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"Human description"}]},{"type":"paragraph","content":[{"type":"text","text":"PRD"}]},{"type":"paragraph","content":[{"type":"text","text":"============="}]},{"type":"paragraph","content":[{"type":"text","text":"old PRD"}]}]}`),
 		},
 		order: &order,
 	}
@@ -90,11 +92,29 @@ func TestExecutePRDRequestedRunsOperationsInOrder(t *testing.T) {
 	}); got != want {
 		t.Fatalf("generator input = %#v, want %#v", got, want)
 	}
-	if got, want := writer.description, "Human description\nPRD\n=============\nGenerated PRD"; got != want {
-		t.Fatalf("updated description = %q, want %q", got, want)
+	if !strings.Contains(string(writer.description), `"text":"Generated PRD"`) {
+		t.Fatalf("updated description = %s, want generated PRD ADF", writer.description)
 	}
 	if writer.status != "PRD REVIEW" {
 		t.Fatalf("transition status = %q, want %q", writer.status, "PRD REVIEW")
+	}
+}
+
+func TestExecutePRDRequestedInvalidADFStopsBeforeUpdate(t *testing.T) {
+	order := []string{}
+	writer := &issueWriterFake{order: &order}
+	var logs bytes.Buffer
+
+	err := ExecutePRDRequested(context.Background(), "ABC-5", &issueReaderFake{
+		issue: jira.Issue{Key: "ABC-5", DescriptionADF: json.RawMessage(`{"type":"not-a-doc"}`)},
+		order: &order,
+	}, writer, &prdGeneratorFake{prd: "secret generated PRD", order: &order}, log.New(&logs, "", 0))
+
+	if err == nil || !strings.Contains(err.Error(), "convert description") {
+		t.Fatalf("error = %v, want description conversion error", err)
+	}
+	if got, want := order, []string{"get issue"}; !equalStrings(got, want) {
+		t.Fatalf("operation order = %v, want %v", got, want)
 	}
 }
 

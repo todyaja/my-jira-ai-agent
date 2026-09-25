@@ -59,19 +59,19 @@ func TestClientUpdateDescriptionSendsADFWithoutCredentials(t *testing.T) {
 			t.Fatalf("request body exposes credentials: %s", body)
 		}
 		var payload struct {
-			Description adfDocument `json:"description"`
+			Description json.RawMessage `json:"description"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if payload.Description.Type != "doc" || len(payload.Description.Content) != 4 || payload.Description.Content[1].Content[0].Text != "PRD" {
-			t.Fatalf("description payload = %+v, want ADF document", payload.Description)
+		if !strings.Contains(string(payload.Description), `"type":"table"`) || !strings.Contains(string(payload.Description), `"text":"PRD"`) {
+			t.Fatalf("description payload = %s, want preserved ADF document", payload.Description)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
-	err := (&Client{BaseURL: server.URL, Email: "user@example.com", Token: "secret-token"}).UpdateDescription(context.Background(), "ABC-1", "Human\nPRD\n=============\nPRD text")
+	err := (&Client{BaseURL: server.URL, Email: "user@example.com", Token: "secret-token"}).UpdateDescription(context.Background(), "ABC-1", json.RawMessage(`{"type":"doc","version":1,"content":[{"type":"table","content":[]},{"type":"paragraph","content":[{"type":"text","text":"PRD"}]}]}`))
 	if err != nil {
 		t.Fatalf("UpdateDescription() error = %v", err)
 	}
@@ -128,7 +128,7 @@ func TestClientUpdateDescriptionNon2xxDoesNotExposeResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := (&Client{BaseURL: server.URL}).UpdateDescription(context.Background(), "ABC-1", "description")
+	err := (&Client{BaseURL: server.URL}).UpdateDescription(context.Background(), "ABC-1", json.RawMessage(`{"type":"doc","version":1,"content":[]}`))
 	if err == nil || !strings.Contains(err.Error(), "PUT description: Jira returned HTTP 502") {
 		t.Fatalf("UpdateDescription() error = %v, want status and operation", err)
 	}

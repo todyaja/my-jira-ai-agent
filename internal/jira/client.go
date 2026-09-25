@@ -58,18 +58,22 @@ func (c *Client) GetIssue(ctx context.Context, key string) (Issue, error) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		return Issue{}, fmt.Errorf("GET issue: decode response: %w", err)
 	}
+	description, err := adfToPlainText(payload.Fields.Description)
+	if err != nil {
+		return Issue{}, fmt.Errorf("GET issue: convert description: %w", err)
+	}
 	return Issue{
 		Key:            payload.Key,
 		Summary:        payload.Fields.Summary,
-		Description:    adfToPlainText(payload.Fields.Description),
+		Description:    description,
 		DescriptionADF: payload.Fields.Description,
 	}, nil
 }
 
-func (c *Client) UpdateDescription(ctx context.Context, key, description string) error {
+func (c *Client) UpdateDescription(ctx context.Context, key string, description json.RawMessage) error {
 	body, err := json.Marshal(struct {
-		Description adfDocument `json:"description"`
-	}{Description: plainTextToADF(description)})
+		Description json.RawMessage `json:"description"`
+	}{Description: description})
 	if err != nil {
 		return fmt.Errorf("PUT description: encode request: %w", err)
 	}

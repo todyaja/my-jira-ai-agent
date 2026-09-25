@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -13,7 +14,7 @@ type IssueReader interface {
 }
 
 type IssueWriter interface {
-	UpdateDescription(context.Context, string, string) error
+	UpdateDescription(context.Context, string, json.RawMessage) error
 	TransitionTo(context.Context, string, string) error
 }
 
@@ -22,6 +23,10 @@ func ExecutePRDRequested(ctx context.Context, key string, reader IssueReader, wr
 	if err != nil {
 		logPRDOperationFailure(logger, key, "get issue")
 		return fmt.Errorf("get issue: %w", err)
+	}
+	if _, err := jira.DescriptionText(issue.DescriptionADF); err != nil {
+		logPRDOperationFailure(logger, key, "convert description")
+		return fmt.Errorf("convert description: %w", err)
 	}
 
 	prd, err := generator.Generate(ctx, PRDInput{
@@ -34,7 +39,11 @@ func ExecutePRDRequested(ctx context.Context, key string, reader IssueReader, wr
 		return fmt.Errorf("generate PRD: %w", err)
 	}
 
-	description := jira.AppendPRD(issue.Description, prd)
+	description, err := jira.AppendPRDToADF(issue.DescriptionADF, prd)
+	if err != nil {
+		logPRDOperationFailure(logger, key, "build description")
+		return fmt.Errorf("build description: %w", err)
+	}
 	if err := writer.UpdateDescription(ctx, key, description); err != nil {
 		logPRDOperationFailure(logger, key, "update description")
 		return fmt.Errorf("update description: %w", err)

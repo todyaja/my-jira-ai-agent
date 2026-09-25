@@ -26,7 +26,7 @@ type fakeIssueWriter struct {
 	called bool
 }
 
-func (f *fakeIssueWriter) UpdateDescription(context.Context, string, string) error {
+func (f *fakeIssueWriter) UpdateDescription(context.Context, string, json.RawMessage) error {
 	f.called = true
 	return nil
 }
