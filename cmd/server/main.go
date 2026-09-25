@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -38,9 +37,8 @@ func main() {
 }
 
 func handleJiraWebhook(w http.ResponseWriter, r *http.Request, accountID string, logger *log.Logger) {
-	var event jira.WebhookEvent
-
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+	event, err := jira.ParseWebhookEvent(r.Body)
+	if err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}

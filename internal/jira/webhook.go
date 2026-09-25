@@ -1,5 +1,10 @@
 package jira
 
+import (
+	"encoding/json"
+	"io"
+)
+
 type WebhookEvent struct {
 	WebhookEvent string `json:"webhookEvent"`
 
@@ -38,6 +43,12 @@ type ChangelogItem struct {
 	FieldID    string  `json:"fieldId"`
 	FromString *string `json:"fromString"`
 	ToString   *string `json:"toString"`
+}
+
+func ParseWebhookEvent(r io.Reader) (WebhookEvent, error) {
+	var event WebhookEvent
+	err := json.NewDecoder(r).Decode(&event)
+	return event, err
 }
 
 func (e WebhookEvent) StatusChangedTo(status string) bool {

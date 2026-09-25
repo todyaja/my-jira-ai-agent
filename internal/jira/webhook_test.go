@@ -1,6 +1,41 @@
 package jira
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseWebhookEvent(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantKey string
+		wantErr bool
+	}{
+		{
+			name:    "decodes webhook event",
+			payload: `{"webhookEvent":"jira:issue_updated","issue":{"key":"DEMO-1"}}`,
+			wantKey: "DEMO-1",
+		},
+		{
+			name:    "rejects invalid JSON",
+			payload: "{",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event, err := ParseWebhookEvent(strings.NewReader(tt.payload))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseWebhookEvent() error = %v, want error: %v", err, tt.wantErr)
+			}
+			if event.Issue.Key != tt.wantKey {
+				t.Fatalf("Issue.Key = %q, want %q", event.Issue.Key, tt.wantKey)
+			}
+		})
+	}
+}
 
 func TestWebhookEventStatusChangedTo(t *testing.T) {
 	to := func(value string) *string { return &value }
