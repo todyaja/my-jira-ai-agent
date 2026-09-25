@@ -5,15 +5,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const maxOpenCodeTimeoutSeconds = int64((1<<63 - 1) / int64(time.Second))
+const openCodeShellMetacharacters = "&|<>^;()$'\"`"
 
 func LoadOpenCodeConfig(getenv func(string) string) (OpenCodeConfig, error) {
 	executable := strings.TrimSpace(getenv("AGENT_COMMAND"))
 	if executable == "" {
 		executable = DefaultOpenCodeExecutable
-	} else if len(strings.Fields(executable)) != 1 {
+	} else if strings.ContainsAny(executable, openCodeShellMetacharacters) || strings.IndexFunc(executable, unicode.IsControl) >= 0 {
 		return OpenCodeConfig{}, fmt.Errorf("AGENT_COMMAND must be exactly one executable path")
 	}
 

@@ -43,6 +43,21 @@ func TestLoadOpenCodeConfigPreservesConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestLoadOpenCodeConfigAcceptsExecutablePathWithSpaces(t *testing.T) {
+	config, err := LoadOpenCodeConfig(func(key string) string {
+		if key == "AGENT_COMMAND" {
+			return `C:\Program Files\OpenCode\opencode.exe`
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("LoadOpenCodeConfig() error = %v", err)
+	}
+	if config.Executable != `C:\Program Files\OpenCode\opencode.exe` {
+		t.Errorf("executable = %q, want Windows path with spaces", config.Executable)
+	}
+}
+
 func TestLoadOpenCodeConfigRejectsInvalidTimeout(t *testing.T) {
 	_, err := LoadOpenCodeConfig(func(key string) string {
 		if key == "OPENCODE_TIMEOUT_SECONDS" {
@@ -61,7 +76,7 @@ func TestLoadOpenCodeConfigRejectsInvalidTimeout(t *testing.T) {
 func TestLoadOpenCodeConfigRejectsShellFragments(t *testing.T) {
 	_, err := LoadOpenCodeConfig(func(key string) string {
 		if key == "AGENT_COMMAND" {
-			return "opencode --model unsafe"
+			return "opencode;echo unsafe"
 		}
 		return ""
 	})
@@ -70,5 +85,57 @@ func TestLoadOpenCodeConfigRejectsShellFragments(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "AGENT_COMMAND") {
 		t.Errorf("error = %q, want command variable name", err)
+	}
+}
+
+func TestLoadOpenCodeConfigRejectsShellMetacharacters(t *testing.T) {
+	for _, command := range []string{
+		"opencode && echo unsafe",
+		"opencode | echo unsafe",
+		"opencode > output.txt",
+		"$(echo unsafe)",
+		"`echo unsafe`",
+	} {
+		t.Run(command, func(t *testing.T) {
+			_, err := LoadOpenCodeConfig(func(key string) string {
+				if key == "AGENT_COMMAND" {
+					return command
+				}
+				return ""
+			})
+			if err == nil {
+				t.Fatalf("LoadOpenCodeConfig(%q) error = nil, want shell metacharacter error", command)
+			}
+		})
+	}
+}
+
+func TestLoadOpenCodeConfigAcceptsMaximumSafeTimeout(t *testing.T) {
+	config, err := LoadOpenCodeConfig(func(key string) string {
+		if key == "OPENCODE_TIMEOUT_SECONDS" {
+			return "9223372036"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("LoadOpenCodeConfig() error = %v, want maximum safe timeout accepted", err)
+	}
+	if config.Timeout != time.Duration(maxOpenCodeTimeoutSeconds)*time.Second {
+		t.Errorf("timeout = %s, want maximum safe timeout", config.Timeout)
+	}
+}
+
+func TestLoadOpenCodeConfigRejectsTimeoutOverflow(t *testing.T) {
+	_, err := LoadOpenCodeConfig(func(key string) string {
+		if key == "OPENCODE_TIMEOUT_SECONDS" {
+			return "9223372037"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("LoadOpenCodeConfig() error = nil, want timeout overflow error")
+	}
+	if !strings.Contains(err.Error(), "OPENCODE_TIMEOUT_SECONDS") {
+		t.Errorf("error = %q, want timeout variable name", err)
 	}
 }
