@@ -39,3 +39,13 @@ type ChangelogItem struct {
 	FromString *string `json:"fromString"`
 	ToString   *string `json:"toString"`
 }
+
+func (e WebhookEvent) StatusChangedTo(status string) bool {
+	for _, item := range e.Changelog.Items {
+		if item.Field == "status" && item.ToString != nil && *item.ToString == status {
+			return true
+		}
+	}
+
+	return false
+}
