@@ -14,7 +14,7 @@ import (
 const (
 	DefaultOpenCodeExecutable = "opencode"
 	DefaultOpenCodeModel      = "openai/gpt-5.6-luna"
-	DefaultOpenCodeTimeout    = 60 * time.Second
+	DefaultOpenCodeTimeout    = 120 * time.Second
 )
 
 type OpenCodeConfig struct {
