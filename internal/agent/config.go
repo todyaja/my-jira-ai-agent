@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const DefaultOpenAITimeout = 60 * time.Second
+const (
+	DefaultOpenAITimeout    = 60 * time.Second
+	maxOpenAITimeoutSeconds = int64((1<<63 - 1) / int64(time.Second))
+)
 
 func LoadOpenAIConfig(getenv func(string) string) (OpenAIConfig, error) {
 	apiKey := getenv("OPENAI_API_KEY")
@@ -19,7 +22,7 @@ func LoadOpenAIConfig(getenv func(string) string) (OpenAIConfig, error) {
 	timeoutValue := getenv("OPENAI_TIMEOUT_SECONDS")
 	if strings.TrimSpace(timeoutValue) != "" {
 		seconds, err := strconv.Atoi(timeoutValue)
-		if err != nil || seconds <= 0 {
+		if err != nil || seconds <= 0 || int64(seconds) > maxOpenAITimeoutSeconds {
 			return OpenAIConfig{}, fmt.Errorf("OPENAI_TIMEOUT_SECONDS must be a positive integer")
 		}
 		timeout = time.Duration(seconds) * time.Second

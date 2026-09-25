@@ -75,6 +75,26 @@ func TestLoadOpenAIConfigRejectsInvalidTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadOpenAIConfigRejectsOverflowingTimeout(t *testing.T) {
+	getenv := func(key string) string {
+		if key == "OPENAI_API_KEY" {
+			return "test-key"
+		}
+		if key == "OPENAI_TIMEOUT_SECONDS" {
+			return "9223372037"
+		}
+		return ""
+	}
+
+	_, err := LoadOpenAIConfig(getenv)
+	if err == nil {
+		t.Fatal("LoadOpenAIConfig() error = nil, want timeout overflow error")
+	}
+	if !strings.Contains(err.Error(), "OPENAI_TIMEOUT_SECONDS must be a positive integer") {
+		t.Errorf("error = %q, want safe timeout configuration error", err)
+	}
+}
+
 func TestLoadOpenAIConfigRejectsMissingAPIKeyWithoutLeakingValue(t *testing.T) {
 	secret := "test-secret-key-value"
 	getenv := func(key string) string {
