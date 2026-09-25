@@ -50,11 +50,11 @@ func main() {
 }
 
 func buildWorkflowDependencies() (workflow.PRDGenerator, error) {
-	config, err := agent.LoadOpenAIConfig(os.Getenv)
+	config, err := agent.LoadOpenCodeConfig(os.Getenv)
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewOpenAIPRDGenerator(config)
+	return agent.NewOpenCodePRDGenerator(config)
 }
 
 func handleJiraWebhook(w http.ResponseWriter, r *http.Request, accountID string, reader workflow.IssueReader, writer workflow.IssueWriter, generator workflow.PRDGenerator, logger *log.Logger) {
