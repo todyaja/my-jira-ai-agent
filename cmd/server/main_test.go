@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
@@ -38,11 +40,12 @@ func (f *fakeIssueWriter) TransitionTo(context.Context, string, string) error {
 
 type fakePRDGenerator struct {
 	called bool
+	err    error
 }
 
 func (f *fakePRDGenerator) Generate(context.Context, workflow.PRDInput) (string, error) {
 	f.called = true
-	return "generated PRD", nil
+	return "generated PRD", f.err
 }
 
 func TestHandleJiraWebhookFiltersAndTriggers(t *testing.T) {
@@ -147,6 +150,40 @@ func TestHandleJiraWebhookRejectsInvalidJSON(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
+	event := jira.WebhookEvent{WebhookEvent: "jira:issue_updated"}
+	event.Issue.Key = "DEMO-1"
+	event.Issue.Fields.Assignee = &jira.User{AccountID: "account-1"}
+	status := "PRD Requested"
+	event.Changelog.Items = []jira.ChangelogItem{{Field: "status", ToString: &status}}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal webhook event: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewReader(payload))
+	response := httptest.NewRecorder()
+	var logs bytes.Buffer
+	generator := &fakePRDGenerator{err: errors.New("OpenAI returned HTTP status 404")}
+
+	handleJiraWebhook(
+		response,
+		request,
+		"account-1",
+		&fakeIssueReader{},
+		&fakeIssueWriter{},
+		generator,
+		log.New(&logs, "", 0),
+	)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(logs.String(), "OpenAI returned HTTP status 404") {
+		t.Fatalf("log = %q, want safe OpenAI status error", logs.String())
 	}
 }
 
