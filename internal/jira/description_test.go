@@ -13,6 +13,14 @@ func TestADFToPlainText(t *testing.T) {
 	}
 }
 
+func TestADFToPlainTextTraversesHeadingsListsBlockquotesAndNestedNodes(t *testing.T) {
+	adf := json.RawMessage(`{"type":"doc","version":1,"content":[{"type":"heading","content":[{"type":"text","text":"Heading"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"First item"},{"type":"hardBreak"},{"type":"link","content":[{"type":"text","text":"continued"}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Second item"}]}]}]},{"type":"blockquote","content":[{"type":"paragraph","content":[{"type":"text","text":"Quoted"}]}]}]}`)
+
+	if got, want := adfToPlainText(adf), "Heading\nFirst item\ncontinued\nSecond item\nQuoted"; got != want {
+		t.Fatalf("adfToPlainText() = %q, want %q", got, want)
+	}
+}
+
 func TestADFToPlainTextEmptyDescription(t *testing.T) {
 	for _, adf := range []json.RawMessage{nil, []byte(`null`), []byte(`{"type":"doc","version":1,"content":[]}`)} {
 		if got := adfToPlainText(adf); got != "" {

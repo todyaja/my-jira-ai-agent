@@ -121,6 +121,42 @@ func TestClientErrorsDoNotExposeResponseBody(t *testing.T) {
 	}
 }
 
+func TestClientUpdateDescriptionNon2xxDoesNotExposeResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, "sensitive PUT response")
+	}))
+	defer server.Close()
+
+	err := (&Client{BaseURL: server.URL}).UpdateDescription(context.Background(), "ABC-1", "description")
+	if err == nil || !strings.Contains(err.Error(), "PUT description: Jira returned HTTP 502") {
+		t.Fatalf("UpdateDescription() error = %v, want status and operation", err)
+	}
+	if strings.Contains(err.Error(), "sensitive PUT response") {
+		t.Fatalf("error exposes response body: %v", err)
+	}
+}
+
+func TestClientTransitionPostNon2xxDoesNotExposeResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			io.WriteString(w, `{"transitions":[{"id":"11","name":"PRD REVIEW"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, "sensitive POST response")
+	}))
+	defer server.Close()
+
+	err := (&Client{BaseURL: server.URL}).TransitionTo(context.Background(), "ABC-1", "PRD REVIEW")
+	if err == nil || !strings.Contains(err.Error(), "POST transition: Jira returned HTTP 502") {
+		t.Fatalf("TransitionTo() error = %v, want status and operation", err)
+	}
+	if strings.Contains(err.Error(), "sensitive POST response") {
+		t.Fatalf("error exposes response body: %v", err)
+	}
+}
+
 func TestClientTransitionToMissingName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"transitions":[{"id":"11","name":"Done"}]}`)

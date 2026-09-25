@@ -8,19 +8,15 @@ import (
 const prdMarker = "PRD\n=============\n"
 
 type adfDocument struct {
-	Type    string     `json:"type"`
-	Version int        `json:"version"`
-	Content []adfBlock `json:"content,omitempty"`
-}
-
-type adfBlock struct {
 	Type    string    `json:"type"`
-	Content []adfText `json:"content,omitempty"`
+	Version int       `json:"version"`
+	Content []adfNode `json:"content,omitempty"`
 }
 
-type adfText struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+type adfNode struct {
+	Type    string    `json:"type"`
+	Text    string    `json:"text,omitempty"`
+	Content []adfNode `json:"content,omitempty"`
 }
 
 func adfToPlainText(raw json.RawMessage) string {
@@ -33,32 +29,46 @@ func adfToPlainText(raw json.RawMessage) string {
 		return ""
 	}
 
-	paragraphs := make([]string, 0, len(document.Content))
-	for _, block := range document.Content {
-		texts := make([]string, 0, len(block.Content))
-		for _, node := range block.Content {
-			if node.Type == "text" {
-				texts = append(texts, node.Text)
-			}
+	var plainText strings.Builder
+	appendADFText(&plainText, document.Content)
+	return strings.TrimRight(plainText.String(), "\n")
+}
+
+func appendADFText(output *strings.Builder, nodes []adfNode) {
+	for _, node := range nodes {
+		switch node.Type {
+		case "text":
+			output.WriteString(node.Text)
+		case "hardBreak":
+			output.WriteByte('\n')
+		default:
+			appendADFText(output, node.Content)
 		}
-		if block.Type == "paragraph" {
-			paragraphs = append(paragraphs, strings.Join(texts, ""))
+		if isADFBlock(node.Type) && output.Len() > 0 && !strings.HasSuffix(output.String(), "\n") {
+			output.WriteByte('\n')
 		}
 	}
-
-	return strings.Join(paragraphs, "\n")
 }
 
 func plainTextToADF(description string) adfDocument {
 	lines := strings.Split(description, "\n")
-	document := adfDocument{Type: "doc", Version: 1, Content: make([]adfBlock, 0, len(lines))}
+	document := adfDocument{Type: "doc", Version: 1, Content: make([]adfNode, 0, len(lines))}
 	for _, line := range lines {
-		document.Content = append(document.Content, adfBlock{
+		document.Content = append(document.Content, adfNode{
 			Type:    "paragraph",
-			Content: []adfText{{Type: "text", Text: line}},
+			Content: []adfNode{{Type: "text", Text: line}},
 		})
 	}
 	return document
+}
+
+func isADFBlock(nodeType string) bool {
+	switch nodeType {
+	case "paragraph", "heading", "listItem", "bulletList", "orderedList", "blockquote", "panel", "expand", "table", "tableRow", "tableCell", "mediaSingle":
+		return true
+	default:
+		return false
+	}
 }
 
 func AppendPRD(description, prd string) string {
