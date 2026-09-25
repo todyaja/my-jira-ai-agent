@@ -6,7 +6,9 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
+	"github.com/tody-aja/jira-ai-agent/internal/agent"
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
+	"github.com/tody-aja/jira-ai-agent/internal/workflow"
 )
 
 func main() {
@@ -19,6 +21,13 @@ func main() {
 	if myAccountID == "" {
 		log.Fatal("JIRA_ACCOUNT_ID is not configured")
 	}
+
+	prdGenerator, err := buildWorkflowDependencies()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The webhook dispatcher will consume this dependency when PRD execution is wired in.
+	_ = prdGenerator
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -34,6 +43,14 @@ func main() {
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func buildWorkflowDependencies() (workflow.PRDGenerator, error) {
+	config, err := agent.LoadOpenAIConfig(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewOpenAIPRDGenerator(config)
 }
 
 func handleJiraWebhook(w http.ResponseWriter, r *http.Request, accountID string, logger *log.Logger) {
