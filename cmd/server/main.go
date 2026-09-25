@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -81,12 +82,14 @@ func handleJiraWebhook(w http.ResponseWriter, r *http.Request, accountID string,
 	}
 
 	logger.Printf("PRD WORKFLOW TRIGGERED FOR %s", event.Issue.Key)
-	err = workflow.ExecutePRDRequested(r.Context(), event.Issue.Key, reader, writer, generator, logger)
-	if err != nil {
-		logger.Printf("PRD operation failed: issue=%s operation=execute PRD requested", event.Issue.Key)
-	}
-	if err == nil {
+	workflowContext := context.WithoutCancel(r.Context())
+	go func() {
+		err := workflow.ExecutePRDRequested(workflowContext, event.Issue.Key, reader, writer, generator, logger)
+		if err != nil {
+			logger.Printf("PRD operation failed: issue=%s operation=execute PRD requested", event.Issue.Key)
+			return
+		}
 		logger.Printf("PRD operation succeeded: issue=%s operation=execute PRD requested", event.Issue.Key)
-	}
+	}()
 	w.WriteHeader(http.StatusOK)
 }

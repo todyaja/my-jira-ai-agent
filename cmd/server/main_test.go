@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
 	"github.com/tody-aja/jira-ai-agent/internal/workflow"
@@ -26,6 +27,7 @@ func (f *fakeIssueReader) GetIssue(_ context.Context, _ string) (jira.Issue, err
 
 type fakeIssueWriter struct {
 	called bool
+	done   chan struct{}
 }
 
 func (f *fakeIssueWriter) UpdateDescription(context.Context, string, json.RawMessage) error {
@@ -35,16 +37,23 @@ func (f *fakeIssueWriter) UpdateDescription(context.Context, string, json.RawMes
 
 func (f *fakeIssueWriter) TransitionTo(context.Context, string, string) error {
 	f.called = true
+	if f.done != nil {
+		close(f.done)
+	}
 	return nil
 }
 
 type fakePRDGenerator struct {
 	called bool
 	err    error
+	done   chan struct{}
 }
 
 func (f *fakePRDGenerator) Generate(context.Context, workflow.PRDInput) (string, error) {
 	f.called = true
+	if f.done != nil {
+		close(f.done)
+	}
 	return "generated PRD", f.err
 }
 
@@ -117,13 +126,25 @@ func TestHandleJiraWebhookFiltersAndTriggers(t *testing.T) {
 			var logs bytes.Buffer
 			logger := log.New(&logs, "", 0)
 			reader := &fakeIssueReader{}
+			var done chan struct{}
 			writer := &fakeIssueWriter{}
+			if tt.wantLog != "" {
+				done = make(chan struct{})
+				writer.done = done
+			}
 			generator := &fakePRDGenerator{}
 
 			handleJiraWebhook(response, request, "account-1", reader, writer, generator, logger)
 
 			if response.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
+			}
+			if done != nil {
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("PRD workflow did not complete")
+				}
 			}
 			if got := logs.String(); got != tt.wantLog {
 				t.Fatalf("log = %q, want %q", got, tt.wantLog)
@@ -167,7 +188,8 @@ func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewReader(payload))
 	response := httptest.NewRecorder()
 	var logs bytes.Buffer
-	generator := &fakePRDGenerator{err: errors.New("OpenAI returned HTTP status 404")}
+	done := make(chan struct{})
+	generator := &fakePRDGenerator{err: errors.New("OpenAI returned HTTP status 404"), done: done}
 
 	handleJiraWebhook(
 		response,
@@ -181,6 +203,11 @@ func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PRD workflow did not start")
 	}
 	if !strings.Contains(logs.String(), "OpenAI returned HTTP status 404") {
 		t.Fatalf("log = %q, want safe OpenAI status error", logs.String())
