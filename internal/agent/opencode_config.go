@@ -15,7 +15,7 @@ func LoadOpenCodeConfig(getenv func(string) string) (OpenCodeConfig, error) {
 	executable := strings.TrimSpace(getenv("AGENT_COMMAND"))
 	if executable == "" {
 		executable = DefaultOpenCodeExecutable
-	} else if strings.ContainsAny(executable, openCodeShellMetacharacters) || strings.IndexFunc(executable, unicode.IsControl) >= 0 {
+	} else if strings.ContainsAny(executable, openCodeShellMetacharacters) || strings.IndexFunc(executable, unicode.IsControl) >= 0 || hasOpenCodeArguments(executable) {
 		return OpenCodeConfig{}, fmt.Errorf("AGENT_COMMAND must be exactly one executable path")
 	}
 
@@ -39,4 +39,15 @@ func LoadOpenCodeConfig(getenv func(string) string) (OpenCodeConfig, error) {
 		Model:      model,
 		Timeout:    timeout,
 	}, nil
+}
+
+// Spaces are valid in executable paths; a whitespace-delimited component
+// beginning with '-' is an appended CLI argument rather than part of a path.
+func hasOpenCodeArguments(executable string) bool {
+	for _, part := range strings.Fields(executable) {
+		if strings.HasPrefix(part, "-") {
+			return true
+		}
+	}
+	return false
 }

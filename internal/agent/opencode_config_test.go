@@ -88,6 +88,21 @@ func TestLoadOpenCodeConfigRejectsShellFragments(t *testing.T) {
 	}
 }
 
+func TestLoadOpenCodeConfigRejectsCommandArguments(t *testing.T) {
+	_, err := LoadOpenCodeConfig(func(key string) string {
+		if key == "AGENT_COMMAND" {
+			return "opencode --model unsafe"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("LoadOpenCodeConfig() error = nil, want command arguments rejected")
+	}
+	if !strings.Contains(err.Error(), "AGENT_COMMAND") {
+		t.Errorf("error = %q, want command variable name", err)
+	}
+}
+
 func TestLoadOpenCodeConfigRejectsShellMetacharacters(t *testing.T) {
 	for _, command := range []string{
 		"opencode && echo unsafe",
