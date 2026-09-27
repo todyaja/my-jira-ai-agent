@@ -2,15 +2,31 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/tody-aja/jira-ai-agent/internal/agent"
+	"github.com/tody-aja/jira-ai-agent/internal/confluence"
+	"github.com/tody-aja/jira-ai-agent/internal/git"
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
 	"github.com/tody-aja/jira-ai-agent/internal/workflow"
 )
+
+const defaultPollInterval = 60 * time.Second
+
+// apiTimeout bounds each Jira and Confluence request, so one stuck request
+// cannot stall the poller.
+const apiTimeout = 60 * time.Second
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -23,7 +39,29 @@ func main() {
 		log.Fatal("JIRA_ACCOUNT_ID is not configured")
 	}
 
-	prdGenerator, err := buildWorkflowDependencies()
+	pollInterval, err := loadPollInterval(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	agents, err := buildAgents(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := agents.planner.CheckRepository(); err != nil {
+		log.Printf("Warning: the Planning step will fail until this is fixed: %v", err)
+	}
+	workspace, err := loadWorkspace(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := workspace.Check(context.Background()); err != nil {
+		log.Printf("Warning: the Implementing and AI Review steps will fail until this is fixed: %v", err)
+	}
+	maxReviewCycles, err := loadMaxReviewCycles(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	confluenceClient, err := loadConfluenceClient(os.Getenv)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,65 +69,150 @@ func main() {
 		os.Getenv("JIRA_BASE_URL"),
 		os.Getenv("JIRA_EMAIL"),
 		os.Getenv("JIRA_API_TOKEN"),
-		nil,
+		&http.Client{Timeout: apiTimeout},
 	)
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-
-	http.HandleFunc("/webhooks/jira", func(w http.ResponseWriter, r *http.Request) {
-		handleJiraWebhook(w, r, myAccountID, jiraClient, jiraClient, prdGenerator, log.Default())
-	})
-
-	log.Println("Jira AI Agent listening on :8080")
-
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func buildWorkflowDependencies() (workflow.PRDGenerator, error) {
-	config, err := agent.LoadOpenCodeConfig(os.Getenv)
-	if err != nil {
-		return nil, err
-	}
-	return agent.NewOpenCodePRDGenerator(config)
-}
-
-func handleJiraWebhook(w http.ResponseWriter, r *http.Request, accountID string, reader workflow.IssueReader, writer workflow.IssueWriter, generator workflow.PRDGenerator, logger *log.Logger) {
-	event, err := jira.ParseWebhookEvent(r.Body)
-	if err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
-		return
-	}
-
-	if event.WebhookEvent != "jira:issue_updated" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if event.Issue.Fields.Assignee == nil ||
-		event.Issue.Fields.Assignee.AccountID != accountID {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if !event.StatusChangedTo("PRD Requested") {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	logger.Printf("PRD WORKFLOW TRIGGERED FOR %s", event.Issue.Key)
-	workflowContext := context.WithoutCancel(r.Context())
+	server := &http.Server{Addr: ":8080", Handler: mux}
 	go func() {
-		err := workflow.ExecutePRDRequested(workflowContext, event.Issue.Key, reader, writer, generator, logger)
-		if err != nil {
-			logger.Printf("PRD operation failed: issue=%s operation=execute PRD requested", event.Issue.Key)
-			return
+		log.Println("Jira AI Agent listening on :8080")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
 		}
-		logger.Printf("PRD operation succeeded: issue=%s operation=execute PRD requested", event.Issue.Key)
 	}()
-	w.WriteHeader(http.StatusOK)
+
+	poller := &workflow.Poller{
+		JQL:      workflow.AssignedIssuesJQL(myAccountID, os.Getenv("JIRA_PROJECT_KEY")),
+		Searcher: jiraClient,
+		Dependencies: workflow.Dependencies{
+			Reader:          jiraClient,
+			Writer:          jiraClient,
+			Generator:       agents.prd,
+			Planner:         agents.planner,
+			Engineer:        agents.engineer,
+			Reviewer:        agents.reviewer,
+			Workspace:       workspace,
+			MaxReviewCycles: maxReviewCycles,
+			Publisher:       confluenceClient,
+			Logger:          log.Default(),
+		},
+	}
+	log.Printf("Polling Jira every %s: %s", pollInterval, poller.JQL)
+	poller.Run(ctx, pollInterval)
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownContext)
+}
+
+// workflowAgents are the Claude agents behind each AI workflow step.
+type workflowAgents struct {
+	prd      *agent.ClaudePRDGenerator
+	planner  *agent.ClaudeTRDGenerator
+	engineer *agent.ClaudeEngineer
+	reviewer *agent.ClaudeReviewer
+}
+
+func buildAgents(getenv func(string) string) (workflowAgents, error) {
+	config, err := agent.LoadClaudeConfig(getenv)
+	if err != nil {
+		return workflowAgents{}, err
+	}
+	var agents workflowAgents
+	if agents.prd, err = agent.NewClaudePRDGenerator(config); err != nil {
+		return workflowAgents{}, err
+	}
+	if agents.planner, err = agent.NewClaudeTRDGenerator(config, strings.TrimSpace(getenv("REPO_PATH"))); err != nil {
+		return workflowAgents{}, err
+	}
+	if agents.engineer, err = agent.NewClaudeEngineer(config); err != nil {
+		return workflowAgents{}, err
+	}
+	if agents.reviewer, err = agent.NewClaudeReviewer(config); err != nil {
+		return workflowAgents{}, err
+	}
+	return agents, nil
+}
+
+// loadWorkspace configures the worktrees issues are implemented in: the
+// repository at REPO_PATH, branched from BASE_BRANCH (default main), with
+// worktrees under WORKTREES_PATH (default beside the repository).
+func loadWorkspace(getenv func(string) string) (*git.Workspace, error) {
+	workspace := &git.Workspace{BaseBranch: strings.TrimSpace(getenv("BASE_BRANCH"))}
+	if workspace.BaseBranch == "" {
+		workspace.BaseBranch = "main"
+	}
+	if repoPath := strings.TrimSpace(getenv("REPO_PATH")); repoPath != "" {
+		absolute, err := filepath.Abs(repoPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve REPO_PATH: %w", err)
+		}
+		workspace.RepoPath = absolute
+		workspace.Root = git.DefaultRoot(absolute)
+	}
+	if root := strings.TrimSpace(getenv("WORKTREES_PATH")); root != "" {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve WORKTREES_PATH: %w", err)
+		}
+		workspace.Root = absolute
+	}
+	return workspace, nil
+}
+
+func loadMaxReviewCycles(getenv func(string) string) (int, error) {
+	value := strings.TrimSpace(getenv("MAX_REVIEW_CYCLES"))
+	if value == "" {
+		return workflow.DefaultMaxReviewCycles, nil
+	}
+	cycles, err := strconv.Atoi(value)
+	if err != nil || cycles <= 0 {
+		return 0, fmt.Errorf("MAX_REVIEW_CYCLES must be a positive integer")
+	}
+	return cycles, nil
+}
+
+// loadConfluenceClient configures publishing to Confluence. The site and
+// credentials default to Jira's, since Atlassian Cloud shares them.
+func loadConfluenceClient(getenv func(string) string) (*confluence.Client, error) {
+	valueOrJira := func(key, jiraKey string) string {
+		if value := strings.TrimSpace(getenv(key)); value != "" {
+			return value
+		}
+		return strings.TrimSpace(getenv(jiraKey))
+	}
+	client := &confluence.Client{
+		BaseURL:      valueOrJira("CONFLUENCE_BASE_URL", "JIRA_BASE_URL"),
+		Email:        valueOrJira("CONFLUENCE_EMAIL", "JIRA_EMAIL"),
+		Token:        valueOrJira("CONFLUENCE_API_TOKEN", "JIRA_API_TOKEN"),
+		SpaceKey:     strings.TrimSpace(getenv("CONFLUENCE_SPACE_KEY")),
+		ParentPageID: strings.TrimSpace(getenv("CONFLUENCE_PARENT_PAGE_ID")),
+		HTTPClient:   &http.Client{Timeout: apiTimeout},
+	}
+	if client.SpaceKey == "" {
+		return nil, fmt.Errorf("CONFLUENCE_SPACE_KEY is not configured")
+	}
+	if client.BaseURL == "" {
+		return nil, fmt.Errorf("CONFLUENCE_BASE_URL or JIRA_BASE_URL must be configured")
+	}
+	return client, nil
+}
+
+func loadPollInterval(getenv func(string) string) (time.Duration, error) {
+	value := strings.TrimSpace(getenv("JIRA_POLL_INTERVAL_SECONDS"))
+	if value == "" {
+		return defaultPollInterval, nil
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return 0, fmt.Errorf("JIRA_POLL_INTERVAL_SECONDS must be a positive integer")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }

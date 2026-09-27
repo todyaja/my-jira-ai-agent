@@ -7,7 +7,16 @@ import (
 	"strings"
 )
 
-const prdMarker = "PRD\n=============\n"
+// The managed block at the end of the description links the documents the
+// agents publish. Each document is a heading paragraph, an underline
+// paragraph and a link paragraph, in managedHeadings order.
+const (
+	prdHeading       = "PRD"
+	trdHeading       = "TRD"
+	managedUnderline = "============="
+)
+
+var managedHeadings = []string{prdHeading, trdHeading}
 
 type adfDocument struct {
 	Type    string            `json:"type"`
@@ -71,16 +80,6 @@ func appendADFText(output *strings.Builder, nodes []json.RawMessage) error {
 	return nil
 }
 
-func plainTextToADF(description string) adfDocument {
-	lines := strings.Split(description, "\n")
-	document := adfDocument{Type: "doc", Version: 1, Content: make([]json.RawMessage, 0, len(lines))}
-	for _, line := range lines {
-		node, _ := json.Marshal(adfNode{Type: "paragraph", Content: []json.RawMessage{mustJSON(adfNode{Type: "text", Text: line})}})
-		document.Content = append(document.Content, node)
-	}
-	return document
-}
-
 func mustJSON(value any) json.RawMessage {
 	raw, _ := json.Marshal(value)
 	return raw
@@ -104,18 +103,20 @@ func isADFBlock(nodeType string) bool {
 	}
 }
 
-func AppendPRD(description, prd string) string {
-	prefix := description
-	if markerIndex := strings.Index(description, prdMarker); markerIndex >= 0 {
-		prefix = description[:markerIndex]
-	}
-	if prefix != "" && !strings.HasSuffix(prefix, "\n") {
-		prefix += "\n"
-	}
-	return prefix + prdMarker + sanitizePRD(prd)
+// AppendPRDLinkToADF sets the PRD link in the managed block at the end of
+// the description, preserving everything before the block and the other
+// document links in it.
+func AppendPRDLinkToADF(raw json.RawMessage, pageURL string) (json.RawMessage, error) {
+	return setDocumentLink(raw, prdHeading, pageURL)
 }
 
-func AppendPRDToADF(raw json.RawMessage, prd string) (json.RawMessage, error) {
+// AppendTRDLinkToADF sets the TRD link in the managed block, below the PRD
+// link.
+func AppendTRDLinkToADF(raw json.RawMessage, pageURL string) (json.RawMessage, error) {
+	return setDocumentLink(raw, trdHeading, pageURL)
+}
+
+func setDocumentLink(raw json.RawMessage, heading, pageURL string) (json.RawMessage, error) {
 	if _, err := adfToPlainText(raw); err != nil {
 		return nil, err
 	}
@@ -127,26 +128,44 @@ func AppendPRDToADF(raw json.RawMessage, prd string) (json.RawMessage, error) {
 		}
 	}
 
+	// Everything from the first managed heading on belongs to the block;
+	// nodes are kept under the heading they follow.
 	managedAt := -1
-	for index := 0; index+1 < len(document.Content); index++ {
-		first, err := adfNodePlainText(document.Content[index])
-		if err != nil {
-			return nil, err
+	sections := map[string][]json.RawMessage{}
+	current := ""
+	for index := 0; index < len(document.Content); index++ {
+		if index+1 < len(document.Content) {
+			name, err := managedHeadingAt(document.Content[index], document.Content[index+1])
+			if err != nil {
+				return nil, err
+			}
+			if name != "" {
+				if managedAt < 0 {
+					managedAt = index
+				}
+				current = name
+				sections[current] = nil
+				index++
+				continue
+			}
 		}
-		second, err := adfNodePlainText(document.Content[index+1])
-		if err != nil {
-			return nil, err
-		}
-		if first == "PRD" && second == "=============" {
-			managedAt = index
-			break
+		if managedAt >= 0 {
+			sections[current] = append(sections[current], document.Content[index])
 		}
 	}
 	if managedAt >= 0 {
 		document.Content = document.Content[:managedAt]
 	}
-	managed := plainTextToADF(prdMarker + sanitizePRD(prd))
-	document.Content = append(document.Content, managed.Content...)
+
+	sections[heading] = []json.RawMessage{linkParagraph(pageURL)}
+	for _, name := range managedHeadings {
+		body, ok := sections[name]
+		if !ok {
+			continue
+		}
+		document.Content = append(document.Content, textParagraph(name), textParagraph(managedUnderline))
+		document.Content = append(document.Content, body...)
+	}
 	updated, err := json.Marshal(document)
 	if err != nil {
 		return nil, fmt.Errorf("encode ADF: %w", err)
@@ -154,24 +173,45 @@ func AppendPRDToADF(raw json.RawMessage, prd string) (json.RawMessage, error) {
 	return updated, nil
 }
 
-func adfNodePlainText(raw json.RawMessage) (string, error) {
-	var node adfNode
-	if err := json.Unmarshal(raw, &node); err != nil {
-		return "", fmt.Errorf("decode ADF node: %w", err)
+// managedHeadingAt returns the document heading that first and second
+// start, or "" when they do not start a managed section.
+func managedHeadingAt(first, second json.RawMessage) (string, error) {
+	heading, err := adfNodePlainText(first)
+	if err != nil {
+		return "", err
 	}
+	underline, err := adfNodePlainText(second)
+	if err != nil {
+		return "", err
+	}
+	if underline != managedUnderline {
+		return "", nil
+	}
+	for _, name := range managedHeadings {
+		if heading == name {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
+func textParagraph(text string) json.RawMessage {
+	return mustJSON(adfNode{Type: "paragraph", Content: []json.RawMessage{mustJSON(adfNode{Type: "text", Text: text})}})
+}
+
+func linkParagraph(href string) json.RawMessage {
+	link := map[string]any{
+		"type":  "text",
+		"text":  href,
+		"marks": []any{map[string]any{"type": "link", "attrs": map[string]string{"href": href}}},
+	}
+	return mustJSON(adfNode{Type: "paragraph", Content: []json.RawMessage{mustJSON(link)}})
+}
+
+func adfNodePlainText(raw json.RawMessage) (string, error) {
 	var output strings.Builder
 	if err := appendADFText(&output, []json.RawMessage{raw}); err != nil {
 		return "", err
 	}
 	return strings.TrimRight(output.String(), "\n"), nil
-}
-
-func sanitizePRD(prd string) string {
-	lines := strings.Split(prd, "\n")
-	for index := 0; index+1 < len(lines); index++ {
-		if lines[index] == "PRD" && lines[index+1] == "=============" {
-			lines[index+1] = "-------------"
-		}
-	}
-	return strings.Join(lines, "\n")
 }
