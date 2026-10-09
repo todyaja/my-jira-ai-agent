@@ -1,0 +1,5 @@
+{
+  "name": "jira-ai-agent",
+  "version": "0.1.0",
+  "description": "Agents and skills for each AI step of the Jira workflow."
+}

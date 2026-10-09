@@ -1,256 +1,115 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
-	"log"
-	"net/http"
-	"net/http/httptest"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/tody-aja/jira-ai-agent/internal/jira"
-	"github.com/tody-aja/jira-ai-agent/internal/workflow"
 )
 
-type fakeIssueReader struct {
-	called bool
-}
-
-func (f *fakeIssueReader) GetIssue(_ context.Context, _ string) (jira.Issue, error) {
-	f.called = true
-	return jira.Issue{Key: "DEMO-1"}, nil
-}
-
-type fakeIssueWriter struct {
-	called bool
-	done   chan struct{}
-}
-
-func (f *fakeIssueWriter) UpdateDescription(context.Context, string, json.RawMessage) error {
-	f.called = true
-	return nil
-}
-
-func (f *fakeIssueWriter) TransitionTo(context.Context, string, string) error {
-	f.called = true
-	if f.done != nil {
-		close(f.done)
-	}
-	return nil
-}
-
-type fakePRDGenerator struct {
-	called bool
-	err    error
-	done   chan struct{}
-}
-
-type synchronizedLogBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-	signal string
-	done   chan struct{}
-}
-
-func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if _, err := b.buffer.Write(p); err != nil {
-		return 0, err
-	}
-	if b.done != nil && strings.Contains(b.buffer.String(), b.signal) {
-		close(b.done)
-		b.done = nil
-	}
-	return len(p), nil
-}
-
-func (b *synchronizedLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
-}
-
-func (f *fakePRDGenerator) Generate(context.Context, workflow.PRDInput) (string, error) {
-	f.called = true
-	if f.done != nil {
-		close(f.done)
-	}
-	return "generated PRD", f.err
-}
-
-func TestHandleJiraWebhookFiltersAndTriggers(t *testing.T) {
+func TestLoadPollInterval(t *testing.T) {
 	tests := []struct {
-		name         string
-		webhookEvent string
-		assignee     *jira.User
-		items        []jira.ChangelogItem
-		wantStatus   int
-		wantLog      string
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
 	}{
-		{
-			name:         "triggers assigned issue entering PRD Requested",
-			webhookEvent: "jira:issue_updated",
-			assignee:     &jira.User{AccountID: "account-1"},
-			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("PRD Requested")}},
-			wantStatus:   http.StatusOK,
-			wantLog:      "PRD WORKFLOW TRIGGERED FOR DEMO-1\nPRD generation started: issue=DEMO-1\nPRD generation completed: issue=DEMO-1\nPRD operation succeeded: issue=DEMO-1 operation=execute PRD requested\n",
-		},
-		{
-			name:         "ignores other webhook event",
-			webhookEvent: "jira:issue_created",
-			assignee:     &jira.User{AccountID: "account-1"},
-			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("PRD Requested")}},
-			wantStatus:   http.StatusOK,
-		},
-		{
-			name:         "ignores unassigned issue",
-			webhookEvent: "jira:issue_updated",
-			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("PRD Requested")}},
-			wantStatus:   http.StatusOK,
-		},
-		{
-			name:         "ignores issue assigned to another account",
-			webhookEvent: "jira:issue_updated",
-			assignee:     &jira.User{AccountID: "account-2"},
-			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("PRD Requested")}},
-			wantStatus:   http.StatusOK,
-		},
-		{
-			name:         "ignores unrelated status transition",
-			webhookEvent: "jira:issue_updated",
-			assignee:     &jira.User{AccountID: "account-1"},
-			items:        []jira.ChangelogItem{{Field: "status", ToString: stringPtr("Planning")}},
-			wantStatus:   http.StatusOK,
-		},
-		{
-			name:         "ignores ordinary field change",
-			webhookEvent: "jira:issue_updated",
-			assignee:     &jira.User{AccountID: "account-1"},
-			items:        []jira.ChangelogItem{{Field: "summary", ToString: stringPtr("new summary")}},
-			wantStatus:   http.StatusOK,
-		},
+		{name: "default when unset", value: "", want: defaultPollInterval},
+		{name: "configured seconds", value: "15", want: 15 * time.Second},
+		{name: "rejects zero", value: "0", wantErr: true},
+		{name: "rejects negative", value: "-5", wantErr: true},
+		{name: "rejects non-integer", value: "1m", wantErr: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			event := jira.WebhookEvent{WebhookEvent: tt.webhookEvent}
-			event.Issue.Key = "DEMO-1"
-			event.Issue.Fields.Assignee = tt.assignee
-			event.Changelog.Items = tt.items
-			payload, err := json.Marshal(event)
-			if err != nil {
-				t.Fatalf("marshal webhook event: %v", err)
-			}
-
-			request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewReader(payload))
-			response := httptest.NewRecorder()
-			var logs bytes.Buffer
-			logger := log.New(&logs, "", 0)
-			reader := &fakeIssueReader{}
-			var done chan struct{}
-			writer := &fakeIssueWriter{}
-			if tt.wantLog != "" {
-				done = make(chan struct{})
-				writer.done = done
-			}
-			generator := &fakePRDGenerator{}
-
-			handleJiraWebhook(response, request, "account-1", reader, writer, generator, logger)
-
-			if response.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
-			}
-			if done != nil {
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-					t.Fatal("PRD workflow did not complete")
+			got, err := loadPollInterval(func(key string) string {
+				if key == "JIRA_POLL_INTERVAL_SECONDS" {
+					return tt.value
 				}
-			}
-			gotLog := logs.String()
-			if tt.wantLog == "" && gotLog != "" {
-				t.Fatalf("log = %q, want empty log", gotLog)
-			}
-			for _, expectedLine := range strings.Split(strings.TrimSpace(tt.wantLog), "\n") {
-				if expectedLine != "" && !strings.Contains(gotLog, expectedLine) {
-					t.Fatalf("log = %q, missing %q", gotLog, expectedLine)
+				return ""
+			})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("loadPollInterval() = %s, want error", got)
 				}
+				return
 			}
-			if tt.wantLog == "" && (reader.called || writer.called || generator.called) {
-				t.Fatal("ignored webhook called a workflow dependency")
-			}
-			if tt.wantLog != "" && (!reader.called || !writer.called || !generator.called) {
-				t.Fatal("authorized webhook did not execute the workflow dependencies")
+			if err != nil || got != tt.want {
+				t.Fatalf("loadPollInterval() = (%s, %v), want %s", got, err, tt.want)
 			}
 		})
 	}
 }
 
-func TestHandleJiraWebhookRejectsInvalidJSON(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewBufferString("{"))
-	response := httptest.NewRecorder()
-	var logs bytes.Buffer
-	reader := &fakeIssueReader{}
-	writer := &fakeIssueWriter{}
-	generator := &fakePRDGenerator{}
-
-	handleJiraWebhook(response, request, "account-1", reader, writer, generator, log.New(&logs, "", 0))
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+func TestLoadConfluenceClient(t *testing.T) {
+	jiraEnv := map[string]string{
+		"JIRA_BASE_URL":        "https://example.atlassian.net",
+		"JIRA_EMAIL":           "jira@example.com",
+		"JIRA_API_TOKEN":       "jira-token",
+		"CONFLUENCE_SPACE_KEY": " ENG ",
 	}
-}
 
-func TestHandleJiraWebhookLogsSafePRDError(t *testing.T) {
-	event := jira.WebhookEvent{WebhookEvent: "jira:issue_updated"}
-	event.Issue.Key = "DEMO-1"
-	event.Issue.Fields.Assignee = &jira.User{AccountID: "account-1"}
-	status := "PRD Requested"
-	event.Changelog.Items = []jira.ChangelogItem{{Field: "status", ToString: &status}}
-	payload, err := json.Marshal(event)
+	client, err := loadConfluenceClient(func(key string) string { return jiraEnv[key] })
 	if err != nil {
-		t.Fatalf("marshal webhook event: %v", err)
+		t.Fatalf("loadConfluenceClient() error = %v", err)
+	}
+	if client.BaseURL != "https://example.atlassian.net" || client.Email != "jira@example.com" || client.Token != "jira-token" || client.SpaceKey != "ENG" || client.ParentPageID != "" {
+		t.Fatalf("client = %+v, want Jira site and credentials", client)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/webhooks/jira", bytes.NewReader(payload))
-	response := httptest.NewRecorder()
-	logsDone := make(chan struct{})
-	var logs synchronizedLogBuffer
-	logs.signal = "OpenAI returned HTTP status 404"
-	logs.done = logsDone
-	done := make(chan struct{})
-	generator := &fakePRDGenerator{err: errors.New("OpenAI returned HTTP status 404"), done: done}
-
-	handleJiraWebhook(
-		response,
-		request,
-		"account-1",
-		&fakeIssueReader{},
-		&fakeIssueWriter{},
-		generator,
-		log.New(&logs, "", 0),
-	)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	overrides := map[string]string{
+		"CONFLUENCE_BASE_URL":       "https://docs.atlassian.net",
+		"CONFLUENCE_EMAIL":          "docs@example.com",
+		"CONFLUENCE_API_TOKEN":      "docs-token",
+		"CONFLUENCE_SPACE_KEY":      "DOCS",
+		"CONFLUENCE_PARENT_PAGE_ID": "123",
 	}
-	select {
-	case <-logsDone:
-	case <-time.After(time.Second):
-		t.Fatal("PRD error was not logged")
+	client, err = loadConfluenceClient(func(key string) string {
+		if value, ok := overrides[key]; ok {
+			return value
+		}
+		return jiraEnv[key]
+	})
+	if err != nil {
+		t.Fatalf("loadConfluenceClient() error = %v", err)
 	}
-	if !strings.Contains(logs.String(), "OpenAI returned HTTP status 404") {
-		t.Fatalf("log = %q, want safe OpenAI status error", logs.String())
+	if client.BaseURL != "https://docs.atlassian.net" || client.Email != "docs@example.com" || client.Token != "docs-token" || client.SpaceKey != "DOCS" || client.ParentPageID != "123" {
+		t.Fatalf("client = %+v, want Confluence overrides", client)
+	}
+
+	for name, env := range map[string]map[string]string{
+		"missing space": {"JIRA_BASE_URL": "https://example.atlassian.net"},
+		"missing site":  {"CONFLUENCE_SPACE_KEY": "ENG"},
+	} {
+		_, err := loadConfluenceClient(func(key string) string { return env[key] })
+		if err == nil || !strings.Contains(err.Error(), "CONFLUENCE_") {
+			t.Errorf("%s: loadConfluenceClient() error = %v, want configuration error", name, err)
+		}
 	}
 }
 
-func stringPtr(value string) *string {
-	return &value
+func TestLoadWorkspaceAndReviewCycles(t *testing.T) {
+	env := map[string]string{"REPO_PATH": "../to-do-app"}
+	workspace, err := loadWorkspace(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("loadWorkspace() error = %v", err)
+	}
+	if workspace.BaseBranch != "main" || !filepath.IsAbs(workspace.RepoPath) || workspace.Root != workspace.RepoPath+"-worktrees" {
+		t.Fatalf("workspace = %+v, want main, absolute repo and sibling worktrees", workspace)
+	}
+
+	env = map[string]string{"REPO_PATH": "../to-do-app", "BASE_BRANCH": "master", "WORKTREES_PATH": "../trees"}
+	workspace, _ = loadWorkspace(func(key string) string { return env[key] })
+	if workspace.BaseBranch != "master" || filepath.Base(workspace.Root) != "trees" {
+		t.Fatalf("workspace = %+v, want configured base branch and root", workspace)
+	}
+
+	for value, want := range map[string]int{"": 3, "5": 5} {
+		if got, err := loadMaxReviewCycles(func(string) string { return value }); err != nil || got != want {
+			t.Fatalf("loadMaxReviewCycles(%q) = (%d, %v), want %d", value, got, err, want)
+		}
+	}
+	if _, err := loadMaxReviewCycles(func(string) string { return "0" }); err == nil {
+		t.Fatal("loadMaxReviewCycles(0) error = nil, want rejection")
+	}
 }
