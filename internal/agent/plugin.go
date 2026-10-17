@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -57,7 +58,7 @@ func installPlugin(root string) (string, error) {
 	}
 	dir := filepath.Join(root, PluginName+"-plugin-"+hex.EncodeToString(hash.Sum(nil))[:12])
 
-	if _, err := os.Stat(dir); err == nil {
+	if pluginInstalled(plugin, dir) {
 		return dir, nil
 	}
 	// Copy beside the target and rename, so an interrupted copy is never
@@ -70,11 +71,52 @@ func installPlugin(root string) (string, error) {
 	if err := os.CopyFS(staging, plugin); err != nil {
 		return "", fmt.Errorf("install Claude plugin: %w", err)
 	}
+	// Clear out a damaged copy so the rename can replace it.
+	if err := os.RemoveAll(dir); err != nil {
+		return "", fmt.Errorf("install Claude plugin: %w", err)
+	}
 	if err := os.Rename(staging, dir); err != nil {
-		if _, statErr := os.Stat(dir); statErr == nil {
+		if pluginInstalled(plugin, dir) {
 			return dir, nil // installed concurrently
 		}
 		return "", fmt.Errorf("install Claude plugin: %w", err)
 	}
 	return dir, nil
+}
+
+// pluginInstalled reports whether dir holds every plugin file with the
+// embedded content. The directory existing is not enough: temp cleaners can
+// delete the files and leave the directories behind.
+func pluginInstalled(plugin fs.FS, dir string) bool {
+	err := fs.WalkDir(plugin, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		want, err := fs.ReadFile(plugin, path)
+		if err != nil {
+			return err
+		}
+		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(path)))
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("%s differs from the embedded plugin", path)
+		}
+		return nil
+	})
+	return err == nil
+}
+
+// pluginRoot is where the plugin is installed: the user cache directory,
+// which temp cleaners such as Windows Storage Sense leave alone, falling back
+// to the temp directory.
+func pluginRoot() string {
+	if cache, err := os.UserCacheDir(); err == nil {
+		root := filepath.Join(cache, PluginName)
+		if err := os.MkdirAll(root, 0o755); err == nil {
+			return root
+		}
+	}
+	return os.TempDir()
 }

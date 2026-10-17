@@ -54,7 +54,7 @@ func (w *Workspace) Prepare(ctx context.Context, branch string) (string, error) 
 	if err := w.Check(ctx); err != nil {
 		return "", err
 	}
-	dir := filepath.Join(w.Root, strings.NewReplacer("/", "-", `\`, "-").Replace(branch))
+	dir := w.worktreeDir(branch)
 	if _, err := os.Stat(dir); err == nil {
 		current, err := w.git(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil || current != branch {
@@ -108,6 +108,38 @@ func (w *Workspace) Diff(ctx context.Context, dir string) (string, error) {
 	return stat + "\n\n" + diff, nil
 }
 
+// Remove deletes branch's worktree, keeping the branch and its commits, so
+// the branch can be checked out in the main checkout. Every change was
+// committed before review, so anything left in the worktree is build or test
+// output and is discarded. Removing a worktree that does not exist is a no-op.
+func (w *Workspace) Remove(ctx context.Context, branch string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	dir := w.worktreeDir(branch)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil
+	}
+	_, err := w.git(ctx, w.RepoPath, "worktree", "remove", "--force", dir)
+	return err
+}
+
+// Push publishes branch to the origin remote with git's own credentials and
+// sets it as the branch's upstream.
+func (w *Workspace) Push(ctx context.Context, branch string) error {
+	if !w.branchExists(ctx, branch) {
+		return fmt.Errorf("branch %s does not exist in %s", branch, w.RepoPath)
+	}
+	_, err := w.git(ctx, w.RepoPath, "push", "--quiet", "--set-upstream", "origin", branch)
+	return err
+}
+
+// worktreeDir is where branch's worktree lives: its name with path
+// separators turned into dashes, e.g. feature-ABC-1 for feature/ABC-1.
+func (w *Workspace) worktreeDir(branch string) string {
+	return filepath.Join(w.Root, strings.NewReplacer("/", "-", `\`, "-").Replace(branch))
+}
+
 func (w *Workspace) branchExists(ctx context.Context, branch string) bool {
 	_, err := w.git(ctx, w.RepoPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return err == nil
@@ -116,6 +148,8 @@ func (w *Workspace) branchExists(ctx context.Context, branch string) bool {
 // git runs a git command in dir and returns its trimmed output.
 func (w *Workspace) git(ctx context.Context, dir string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// Fail instead of waiting forever for a credentials prompt nobody sees.
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

@@ -27,6 +27,10 @@ type Workspace interface {
 	CommitAll(ctx context.Context, dir, message string) (bool, error)
 	// Diff returns the branch's changes against the base branch.
 	Diff(ctx context.Context, dir string) (string, error)
+	// Remove deletes branch's checkout, keeping the branch.
+	Remove(ctx context.Context, branch string) error
+	// Push publishes branch to the remote repository.
+	Push(ctx context.Context, branch string) error
 }
 
 type ImplementInput struct {
@@ -79,12 +83,15 @@ type Reviewer interface {
 
 // ImplementationBranch names the branch an issue is implemented on.
 func ImplementationBranch(key string) string {
-	return "ai/" + key
+	return "feature/" + key
 }
 
 type implementationState struct {
 	Branch  string         `json:"branch"`
 	Reviews []reviewRecord `json:"reviews"`
+	// PullRequest is the URL of the pull request opened for Branch, once
+	// there is one.
+	PullRequest string `json:"pullRequest,omitempty"`
 }
 
 type reviewRecord struct {
@@ -279,6 +286,16 @@ func ExecuteAIReview(ctx context.Context, key string, deps Dependencies) error {
 	if err := deps.Writer.TransitionTo(ctx, key, string(next)); err != nil {
 		logOperationFailure(logger, "Review", key, "transition", err, 0)
 		return fmt.Errorf("transition: %w", err)
+	}
+	if next == StatusPRReady {
+		// The agents are done with the worktree. Removing it frees the branch
+		// to be checked out in the main checkout. A leftover worktree is only
+		// clutter, so failing to remove it does not fail the review.
+		if err := deps.Workspace.Remove(ctx, state.Branch); err != nil {
+			logOperationFailure(logger, "Review", key, "remove worktree", err, 0)
+		} else if logger != nil {
+			logger.Printf("Worktree removed: issue=%s branch=%s", key, state.Branch)
+		}
 	}
 	return nil
 }

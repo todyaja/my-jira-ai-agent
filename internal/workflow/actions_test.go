@@ -84,7 +84,7 @@ func TestParseStatusMatchesJiraNamesIgnoringCase(t *testing.T) {
 func TestDispatchNoOpStatuses(t *testing.T) {
 	for _, status := range Statuses {
 		switch status {
-		case StatusPRDRequested, StatusPlanning, StatusReadyToImplement, StatusImplementing, StatusAIReview:
+		case StatusPRDRequested, StatusPlanning, StatusReadyToImplement, StatusImplementing, StatusAIReview, StatusPRReady:
 			continue
 		}
 		t.Run(string(status), func(t *testing.T) {

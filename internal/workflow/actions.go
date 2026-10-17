@@ -18,7 +18,11 @@ type Dependencies struct {
 	// MaxReviewCycles bounds the AI review rounds per implementation.
 	MaxReviewCycles int
 	Publisher       PagePublisher
-	Logger          *log.Logger
+	// PullRequests opens the pull request in PR Ready; nil skips that step.
+	PullRequests PullRequestOpener
+	// JiraBaseURL, when set, links pull requests back to their issue.
+	JiraBaseURL string
+	Logger      *log.Logger
 }
 
 type action func(ctx context.Context, issueKey string) error
@@ -76,8 +80,10 @@ func aiReviewAction(deps Dependencies) action {
 	}
 }
 
-func prReadyAction(logger *log.Logger) action {
-	return noOpAction(StatusPRReady, logger)
+func prReadyAction(deps Dependencies) action {
+	return func(ctx context.Context, issueKey string) error {
+		return ExecutePRReady(ctx, issueKey, deps)
+	}
 }
 
 func doneAction(logger *log.Logger) action {
@@ -119,7 +125,7 @@ func Dispatch(ctx context.Context, status Status, issueKey string, deps Dependen
 	case StatusAIReview:
 		selected = aiReviewAction(deps)
 	case StatusPRReady:
-		selected = prReadyAction(deps.Logger)
+		selected = prReadyAction(deps)
 	case StatusDone:
 		selected = doneAction(deps.Logger)
 	case StatusAIError:

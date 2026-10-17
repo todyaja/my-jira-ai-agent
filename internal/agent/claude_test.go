@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -83,6 +84,7 @@ func runClaudeHelper() {
 		fmt.Print(`{"type":"result","subtype":"error_max_turns","is_error":true,"result":"partial"}`)
 		os.Exit(1)
 	case "failure":
+		fmt.Fprintln(os.Stderr, "helper agent not found")
 		fmt.Fprintln(os.Stderr, "private helper diagnostic")
 		os.Exit(17)
 	case "invalid-json":
@@ -130,7 +132,7 @@ func TestClaudePRDGeneratorFailures(t *testing.T) {
 	}{
 		{mode: "empty", wantErr: "no generated output"},
 		{mode: "error-result", wantErr: "Claude command failed: error_max_turns"},
-		{mode: "failure", wantErr: "Claude command failed"},
+		{mode: "failure", wantErr: "Claude command failed: helper agent not found"},
 		{mode: "invalid-json", wantErr: "decode Claude output"},
 	}
 	for _, tt := range tests {
@@ -174,6 +176,49 @@ func TestInstallPluginWritesAgentAndSkill(t *testing.T) {
 	again, err := installPlugin(root)
 	if err != nil || again != dir {
 		t.Fatalf("installPlugin() again = (%q, %v), want reuse of %q", again, err, dir)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 1 {
+		t.Fatalf("root has %d entries, want only the installed plugin", len(entries))
+	}
+}
+
+func TestStderrSummaryKeepsFirstLineOnly(t *testing.T) {
+	if got := stderrSummary("\n  first line  \nsecond line\n"); got != "first line" {
+		t.Fatalf("stderrSummary() = %q, want first line", got)
+	}
+	long := strings.Repeat("x", maxStderrSummary+50)
+	if got := stderrSummary(long); got != long[:maxStderrSummary]+"..." {
+		t.Fatalf("stderrSummary() = %q, want capped at %d bytes", got, maxStderrSummary)
+	}
+	if got := stderrSummary("  \n"); got != "" {
+		t.Fatalf("stderrSummary() = %q, want empty", got)
+	}
+}
+
+func TestInstallPluginRepairsEmptiedInstall(t *testing.T) {
+	root := t.TempDir()
+	dir, err := installPlugin(root)
+	if err != nil {
+		t.Fatalf("installPlugin() error = %v", err)
+	}
+	// A temp cleaner deletes the files but leaves the directories.
+	agentFile := filepath.Join(dir, "agents", "prd-maker.md")
+	if err := os.Remove(agentFile); err != nil {
+		t.Fatalf("remove agent file: %v", err)
+	}
+	skillFile := filepath.Join(dir, "skills", "prd-writing", "SKILL.md")
+	if err := os.WriteFile(skillFile, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("overwrite skill file: %v", err)
+	}
+
+	again, err := installPlugin(root)
+	if err != nil || again != dir {
+		t.Fatalf("installPlugin() again = (%q, %v), want repair of %q", again, err, dir)
+	}
+	plugin, _ := fs.Sub(pluginFiles, "plugin")
+	if !pluginInstalled(plugin, dir) {
+		t.Fatalf("plugin at %q was not restored", dir)
 	}
 	entries, _ := os.ReadDir(root)
 	if len(entries) != 1 {

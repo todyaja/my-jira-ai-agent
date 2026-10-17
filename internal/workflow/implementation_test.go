@@ -18,6 +18,22 @@ type workspaceFake struct {
 	diff      string
 	branch    string
 	message   string
+	removeErr error
+	pushErr   error
+	removed   string
+	pushed    string
+}
+
+func (f *workspaceFake) Remove(_ context.Context, branch string) error {
+	*f.order = append(*f.order, "remove worktree")
+	f.removed = branch
+	return f.removeErr
+}
+
+func (f *workspaceFake) Push(_ context.Context, branch string) error {
+	*f.order = append(*f.order, "push")
+	f.pushed = branch
+	return f.pushErr
 }
 
 func (f *workspaceFake) Prepare(_ context.Context, branch string) (string, error) {
@@ -119,8 +135,8 @@ func TestReadyToImplementStartsCycleAndMovesToImplementing(t *testing.T) {
 	if got, want := f.order, []string{"save state", "comment", "transition"}; !equalStrings(got, want) {
 		t.Fatalf("operation order = %v, want %v", got, want)
 	}
-	if state := f.savedState(t); state.Branch != "ai/ABC-1" || len(state.Reviews) != 0 {
-		t.Fatalf("state = %+v, want a fresh cycle on ai/ABC-1", state)
+	if state := f.savedState(t); state.Branch != "feature/ABC-1" || len(state.Reviews) != 0 {
+		t.Fatalf("state = %+v, want a fresh cycle on feature/ABC-1", state)
 	}
 	if !strings.Contains(string(f.writer.comments[0]), "up to 3 review rounds") || f.writer.status != "IMPLEMENTING" {
 		t.Fatalf("comment = %s, status = %q, want start comment and IMPLEMENTING", f.writer.comments[0], f.writer.status)
@@ -128,7 +144,7 @@ func TestReadyToImplementStartsCycleAndMovesToImplementing(t *testing.T) {
 }
 
 func TestImplementingFirstRoundImplementsTRDAndMovesToAIReview(t *testing.T) {
-	f := newImplementationFixture(`{"branch":"ai/ABC-1","reviews":[]}`)
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[]}`)
 
 	if err := Dispatch(context.Background(), StatusImplementing, "ABC-1", f.deps(3)); err != nil {
 		t.Fatalf("Dispatch() error = %v", err)
@@ -137,14 +153,14 @@ func TestImplementingFirstRoundImplementsTRDAndMovesToAIReview(t *testing.T) {
 		t.Fatalf("operation order = %v, want %v", got, want)
 	}
 	input := f.engineer.input
-	if input.PRD != "<p>PRD</p>" || input.TRD != "<p>TRD</p>" || input.Dir != "/worktrees/ai/ABC-1" || input.Branch != "ai/ABC-1" || input.Review != "" {
+	if input.PRD != "<p>PRD</p>" || input.TRD != "<p>TRD</p>" || input.Dir != "/worktrees/feature/ABC-1" || input.Branch != "feature/ABC-1" || input.Review != "" {
 		t.Fatalf("engineer input = %+v, want documents, worktree and no review", input)
 	}
 	if f.workspace.message != "ABC-1: implement Build a feature" {
 		t.Fatalf("commit message = %q", f.workspace.message)
 	}
 	comment, _ := jira.DescriptionText(f.writer.comments[0])
-	if !strings.Contains(comment, "Implementation round 1") || !strings.Contains(comment, "Committed to branch ai/ABC-1") || !strings.Contains(comment, "app.ts") {
+	if !strings.Contains(comment, "Implementation round 1") || !strings.Contains(comment, "Committed to branch feature/ABC-1") || !strings.Contains(comment, "app.ts") {
 		t.Fatalf("comment = %q, want round header and summary", comment)
 	}
 	if f.writer.status != "AI REVIEW" {
@@ -153,7 +169,7 @@ func TestImplementingFirstRoundImplementsTRDAndMovesToAIReview(t *testing.T) {
 }
 
 func TestImplementingAddressesLatestRequestedChanges(t *testing.T) {
-	f := newImplementationFixture(`{"branch":"ai/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"}]}`,
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"}]}`,
 		jira.Comment{ID: "r1", Body: "Blocking: missing test for empty title"},
 	)
 
@@ -200,7 +216,7 @@ func TestImplementingEngineerFailureStopsBeforeCommit(t *testing.T) {
 }
 
 func TestAIReviewRequestingChangesReturnsToImplementing(t *testing.T) {
-	f := newImplementationFixture(`{"branch":"ai/ABC-1","reviews":[]}`)
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[]}`)
 	f.reviewer.result = ReviewResult{Review: "## Blocking findings\n1. Missing test"}
 
 	if err := Dispatch(context.Background(), StatusAIReview, "ABC-1", f.deps(3)); err != nil {
@@ -227,7 +243,7 @@ func TestAIReviewRequestingChangesReturnsToImplementing(t *testing.T) {
 }
 
 func TestAIReviewApprovalMovesToPRReady(t *testing.T) {
-	f := newImplementationFixture(`{"branch":"ai/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"}]}`,
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"}]}`,
 		jira.Comment{ID: "r1", Body: "Round 1 review"},
 	)
 	f.reviewer.result = ReviewResult{Approved: true, Review: "All good"}
@@ -244,10 +260,38 @@ func TestAIReviewApprovalMovesToPRReady(t *testing.T) {
 	if state := f.savedState(t); len(state.Reviews) != 2 || !state.Reviews[1].Approved {
 		t.Fatalf("state = %+v, want approved round 2", state)
 	}
+	if got := f.order[len(f.order)-2:]; !equalStrings(got, []string{"transition", "remove worktree"}) || f.workspace.removed != "feature/ABC-1" {
+		t.Fatalf("operation order ends %v removing %q, want the worktree of feature/ABC-1 removed after the transition", got, f.workspace.removed)
+	}
+}
+
+func TestAIReviewKeepsWorktreeWhenRequestingChanges(t *testing.T) {
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[]}`)
+	f.reviewer.result = ReviewResult{Review: "Fix it"}
+
+	if err := Dispatch(context.Background(), StatusAIReview, "ABC-1", f.deps(3)); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if f.workspace.removed != "" {
+		t.Fatalf("removed worktree of %q, want it kept for the next round", f.workspace.removed)
+	}
+}
+
+func TestAIReviewSucceedsWhenWorktreeRemovalFails(t *testing.T) {
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[]}`)
+	f.reviewer.result = ReviewResult{Approved: true, Review: "All good"}
+	f.workspace.removeErr = errors.New("worktree locked")
+
+	if err := Dispatch(context.Background(), StatusAIReview, "ABC-1", f.deps(3)); err != nil {
+		t.Fatalf("Dispatch() error = %v, want removal failure ignored", err)
+	}
+	if f.writer.status != "PR READY" {
+		t.Fatalf("status = %q, want PR READY", f.writer.status)
+	}
 }
 
 func TestAIReviewLastRoundMovesToPRReadyWithOpenFindings(t *testing.T) {
-	f := newImplementationFixture(`{"branch":"ai/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"},{"round":2,"approved":false,"commentId":"r2"}]}`,
+	f := newImplementationFixture(`{"branch":"feature/ABC-1","reviews":[{"round":1,"approved":false,"commentId":"r1"},{"round":2,"approved":false,"commentId":"r2"}]}`,
 		jira.Comment{ID: "r1", Body: "one"}, jira.Comment{ID: "r2", Body: "two"},
 	)
 	f.reviewer.result = ReviewResult{Review: "Still a blocking bug"}
