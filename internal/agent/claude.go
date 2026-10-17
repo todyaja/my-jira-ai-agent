@@ -82,7 +82,7 @@ func newClaudeCLI(config ClaudeConfig) (claudeCLI, error) {
 	if executable == "" {
 		executable = DefaultClaudeExecutable
 	}
-	pluginDir, err := installPlugin(os.TempDir())
+	pluginDir, err := installPlugin(pluginRoot())
 	if err != nil {
 		return claudeCLI{}, err
 	}
@@ -177,8 +177,9 @@ func (c claudeCLI) runResult(ctx context.Context, spec claudeRun) (claudeResult,
 	command.Dir = spec.dir
 	command.Env = withoutAPIKeys(os.Environ())
 	command.WaitDelay = 5 * time.Second
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
+	command.Stderr = &stderr
 
 	if err := command.Run(); err != nil {
 		if commandContext.Err() == context.DeadlineExceeded {
@@ -189,6 +190,9 @@ func (c claudeCLI) runResult(ctx context.Context, spec claudeRun) (claudeResult,
 		}
 		if message := claudeErrorMessage(stdout.Bytes()); message != "" {
 			return claudeResult{}, fmt.Errorf("Claude command failed: %s", message)
+		}
+		if line := stderrSummary(stderr.String()); line != "" {
+			return claudeResult{}, fmt.Errorf("Claude command failed: %s", line)
 		}
 		return claudeResult{}, fmt.Errorf("Claude command failed")
 	}
@@ -246,6 +250,22 @@ func claudeErrorMessage(output []byte) string {
 		return ""
 	}
 	return result.Subtype
+}
+
+// maxStderrSummary caps how much of the CLI's stderr reaches an error.
+const maxStderrSummary = 200
+
+// stderrSummary returns the first line of a failed run's stderr, capped at
+// maxStderrSummary bytes. That line names startup failures such as an unknown
+// agent or a logged-out CLI; the rest is dropped so issue text the CLI
+// might echo stays out of errors and logs.
+func stderrSummary(stderr string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(stderr), "\n")
+	line = strings.TrimSpace(line)
+	if len(line) > maxStderrSummary {
+		line = strings.ToValidUTF8(line[:maxStderrSummary], "") + "..."
+	}
+	return line
 }
 
 // withoutAPIKeys drops Anthropic credentials so the CLI falls back to the
