@@ -104,3 +104,53 @@ func TestWorkspaceCheckRejectsMissingBaseBranch(t *testing.T) {
 		t.Fatalf("Check() error = %v, want not a repository", err)
 	}
 }
+
+func TestWorkspaceRemoveKeepsBranch(t *testing.T) {
+	repo := newRepo(t)
+	workspace := &Workspace{RepoPath: repo, BaseBranch: "main", Root: DefaultRoot(repo)}
+	ctx := context.Background()
+	dir, _ := workspace.Prepare(ctx, "feature/ABC-3")
+	os.WriteFile(filepath.Join(dir, "done.txt"), []byte("done\n"), 0o644)
+	workspace.CommitAll(ctx, dir, "done")
+	// Leftover build output must not block removal.
+	os.WriteFile(filepath.Join(dir, "output.log"), []byte("log\n"), 0o644)
+
+	if err := workspace.Remove(ctx, "feature/ABC-3"); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still exists", dir)
+	}
+	if output, err := exec.Command("git", "-C", repo, "checkout", "--quiet", "feature/ABC-3").CombinedOutput(); err != nil {
+		t.Fatalf("checkout of the kept branch in the main checkout: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "done.txt")); err != nil {
+		t.Fatal("branch lost its commit")
+	}
+	if err := workspace.Remove(ctx, "feature/ABC-3"); err != nil {
+		t.Fatalf("Remove() of a missing worktree = %v, want no-op", err)
+	}
+}
+
+func TestWorkspacePushPublishesBranch(t *testing.T) {
+	repo := newRepo(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	for _, args := range [][]string{{"init", "--quiet", "--bare", remote}, {"-C", repo, "remote", "add", "origin", remote}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	workspace := &Workspace{RepoPath: repo, BaseBranch: "main", Root: DefaultRoot(repo)}
+	ctx := context.Background()
+	workspace.Prepare(ctx, "feature/ABC-4")
+
+	if err := workspace.Push(ctx, "feature/ABC-4"); err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+	if output, err := exec.Command("git", "-C", remote, "rev-parse", "--verify", "refs/heads/feature/ABC-4").CombinedOutput(); err != nil {
+		t.Fatalf("remote has no feature/ABC-4: %v\n%s", err, output)
+	}
+	if err := workspace.Push(ctx, "feature/missing"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("Push() of a missing branch = %v, want does not exist", err)
+	}
+}

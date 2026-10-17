@@ -113,3 +113,19 @@ func TestLoadWorkspaceAndReviewCycles(t *testing.T) {
 		t.Fatal("loadMaxReviewCycles(0) error = nil, want rejection")
 	}
 }
+
+func TestLoadGitHubClient(t *testing.T) {
+	client, err := loadGitHubClient(func(string) string { return "" }, "main")
+	if err != nil || client != nil {
+		t.Fatalf("loadGitHubClient() without a token = (%v, %v), want the step turned off", client, err)
+	}
+	env := map[string]string{"GITHUB_TOKEN": "t", "GITHUB_OWNER": "octo", "GITHUB_REPO": "https://github.com/octo/app"}
+	client, err = loadGitHubClient(func(key string) string { return env[key] }, "master")
+	if err != nil || client.Owner != "octo" || client.Repo != "app" || client.Base != "master" || client.Token != "t" {
+		t.Fatalf("loadGitHubClient() = (%+v, %v), want octo/app into master", client, err)
+	}
+	env["GITHUB_REPO"] = ""
+	if _, err := loadGitHubClient(func(key string) string { return env[key] }, "master"); err == nil {
+		t.Fatal("loadGitHubClient() without a repository succeeded, want an error")
+	}
+}

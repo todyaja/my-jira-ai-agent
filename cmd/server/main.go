@@ -18,6 +18,7 @@ import (
 	"github.com/tody-aja/jira-ai-agent/internal/agent"
 	"github.com/tody-aja/jira-ai-agent/internal/confluence"
 	"github.com/tody-aja/jira-ai-agent/internal/git"
+	"github.com/tody-aja/jira-ai-agent/internal/github"
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
 	"github.com/tody-aja/jira-ai-agent/internal/workflow"
 )
@@ -65,6 +66,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pullRequests, err := loadGitHubClient(os.Getenv, workspace.BaseBranch)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if pullRequests == nil {
+		log.Println("Warning: GITHUB_TOKEN is not configured, so issues reaching PR Ready get no pull request")
+	}
 	jiraClient := jira.NewClient(
 		os.Getenv("JIRA_BASE_URL"),
 		os.Getenv("JIRA_EMAIL"),
@@ -101,8 +109,14 @@ func main() {
 			Workspace:       workspace,
 			MaxReviewCycles: maxReviewCycles,
 			Publisher:       confluenceClient,
+			JiraBaseURL:     os.Getenv("JIRA_BASE_URL"),
 			Logger:          log.Default(),
 		},
+	}
+	// Only a configured client is set: a nil *github.Client in the interface
+	// would not read as nil.
+	if pullRequests != nil {
+		poller.Dependencies.PullRequests = pullRequests
 	}
 	log.Printf("Polling Jira every %s: %s", pollInterval, poller.JQL)
 	poller.Run(ctx, pollInterval)
@@ -203,6 +217,27 @@ func loadConfluenceClient(getenv func(string) string) (*confluence.Client, error
 		return nil, fmt.Errorf("CONFLUENCE_BASE_URL or JIRA_BASE_URL must be configured")
 	}
 	return client, nil
+}
+
+// loadGitHubClient configures opening pull requests into baseBranch. It
+// returns nil when GITHUB_TOKEN is empty, which turns the step off.
+// GITHUB_REPO may be the repository name, owner/repo, or its URL.
+func loadGitHubClient(getenv func(string) string, baseBranch string) (*github.Client, error) {
+	token := strings.TrimSpace(getenv("GITHUB_TOKEN"))
+	if token == "" {
+		return nil, nil
+	}
+	owner, repo, err := github.ParseRepository(getenv("GITHUB_OWNER"), getenv("GITHUB_REPO"))
+	if err != nil {
+		return nil, fmt.Errorf("GITHUB_OWNER and GITHUB_REPO: %w", err)
+	}
+	return &github.Client{
+		Owner:      owner,
+		Repo:       repo,
+		Token:      token,
+		Base:       baseBranch,
+		HTTPClient: &http.Client{Timeout: apiTimeout},
+	}, nil
 }
 
 func loadPollInterval(getenv func(string) string) (time.Duration, error) {
