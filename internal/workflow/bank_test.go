@@ -573,3 +573,26 @@ func TestBankWorkflowSteps(t *testing.T) {
 		t.Error("ErrorStatus() is not AI ERROR")
 	}
 }
+
+func TestTickedReposPrefersTheRepositoriesField(t *testing.T) {
+	f := newBankFake(t, "bnc_busi") // the description ticks bnc_busi
+	bank := f.deps().Bank
+	bank.RepoFieldID = "customfield_10100"
+
+	f.issue.Fields = map[string]json.RawMessage{"customfield_10100": json.RawMessage(`[{"value":"sump-vue"},{"value":"bnc_iobus"}]`)}
+	selected, err := tickedRepos(f.issue, bank)
+	if err != nil || strings.Join(repoNames(selected), ",") != "sump-vue,bnc_iobus" {
+		t.Fatalf("tickedRepos() = %q, %v, want the field's options", repoNames(selected), err)
+	}
+
+	f.issue.Fields = map[string]json.RawMessage{"customfield_10100": json.RawMessage(`null`)}
+	selected, err = tickedRepos(f.issue, bank)
+	if err != nil || strings.Join(repoNames(selected), ",") != "bnc_busi" {
+		t.Fatalf("tickedRepos() with an empty field = %q, %v, want the description checklist", repoNames(selected), err)
+	}
+
+	f.issue.Fields = map[string]json.RawMessage{"customfield_10100": json.RawMessage(`[{"value":"qris-api"}]`)}
+	if _, err := tickedRepos(f.issue, bank); err == nil || !strings.Contains(err.Error(), "unknown repositories qris-api") {
+		t.Fatalf("tickedRepos() error = %v, want the unknown option reported", err)
+	}
+}

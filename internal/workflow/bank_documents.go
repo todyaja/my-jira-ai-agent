@@ -147,7 +147,7 @@ func executeDocument(ctx context.Context, key string, kind documentKind, deps De
 	if err != nil {
 		return fail("get issue", err)
 	}
-	ticked, err := tickedRepos(issue, deps.Bank.Repos)
+	ticked, err := tickedRepos(issue, deps.Bank)
 	if err != nil {
 		return fail("select repositories", err)
 	}

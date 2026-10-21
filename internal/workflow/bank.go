@@ -80,7 +80,11 @@ type MergeRequestOpener interface {
 // also uses the shared Reader, Writer, Engineer, Reviewer, MaxReviewCycles,
 // JiraBaseURL and Logger.
 type BankDependencies struct {
-	Repos     RepoSelector
+	Repos RepoSelector
+	// RepoFieldID is the checkbox field listing the repositories a ticket
+	// changes; empty, or empty on a ticket, falls back to the checklist in
+	// the description.
+	RepoFieldID string
 	Documents DocumentWriter
 	Planner   RepoPlanner
 	// Workspace returns the worktree manager of a repository.
@@ -170,21 +174,34 @@ func noBankAction(status Status) bankAction {
 	}
 }
 
-// tickedRepos returns the repositories checked in the issue's description.
-func tickedRepos(issue jira.Issue, selector RepoSelector) ([]repos.Repo, error) {
+// tickedRepos returns the repositories ticked in the issue's repositories
+// field, or else in the checklist in its description.
+func tickedRepos(issue jira.Issue, bank BankDependencies) ([]repos.Repo, error) {
+	selector := bank.Repos
 	if selector == nil {
 		return nil, fmt.Errorf("no repositories are configured (REPOS_ROOT)")
 	}
-	names, err := jira.CheckedItems(issue.DescriptionADF)
-	if err != nil {
-		return nil, fmt.Errorf("read repository checklist: %w", err)
+	names := []string{}
+	if bank.RepoFieldID != "" {
+		checked, err := issue.CheckedOptions(bank.RepoFieldID)
+		if err != nil {
+			return nil, fmt.Errorf("read repositories field: %w", err)
+		}
+		names = checked
+	}
+	if len(names) == 0 {
+		checked, err := jira.CheckedItems(issue.DescriptionADF)
+		if err != nil {
+			return nil, fmt.Errorf("read repository checklist: %w", err)
+		}
+		names = checked
 	}
 	if len(names) == 0 {
 		all := []string{}
 		for _, repo := range selector.All() {
 			all = append(all, repo.Name)
 		}
-		return nil, fmt.Errorf("no repository is ticked in the description; add a checklist of the repositories that change (%s) and tick them", strings.Join(all, ", "))
+		return nil, fmt.Errorf("no repository is ticked; tick the repositories that change in the Repositories field, or in a checklist in the description (%s)", strings.Join(all, ", "))
 	}
 	return selector.Select(names)
 }

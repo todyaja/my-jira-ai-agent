@@ -62,7 +62,7 @@ func ExecuteBankReadyToImplement(ctx context.Context, key string, deps Dependenc
 	if err != nil {
 		return fail("get issue", err)
 	}
-	ticked, err := tickedRepos(issue, deps.Bank.Repos)
+	ticked, err := tickedRepos(issue, deps.Bank)
 	if err != nil {
 		return fail("select repositories", err)
 	}
@@ -476,7 +476,7 @@ func loadBankWork(ctx context.Context, key string, deps Dependencies) (bankWork,
 		return work, fmt.Errorf("get issue: %w", err)
 	}
 	work.issue = issue
-	ticked, err := tickedRepos(issue, deps.Bank.Repos)
+	ticked, err := tickedRepos(issue, deps.Bank)
 	if err != nil {
 		return work, err
 	}

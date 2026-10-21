@@ -22,14 +22,18 @@ type Issue struct {
 	Summary        string
 	Description    string
 	DescriptionADF json.RawMessage
+	// Fields holds every field's raw value by field id, for custom fields.
+	Fields map[string]json.RawMessage
 }
 
 type issueResponse struct {
-	Key    string `json:"key"`
-	Fields struct {
-		Summary     string          `json:"summary"`
-		Description json.RawMessage `json:"description"`
-	} `json:"fields"`
+	Key    string          `json:"key"`
+	Fields json.RawMessage `json:"fields"`
+}
+
+type issueFields struct {
+	Summary     string          `json:"summary"`
+	Description json.RawMessage `json:"description"`
 }
 
 type transitionsResponse struct {
@@ -58,15 +62,26 @@ func (c *Client) GetIssue(ctx context.Context, key string) (Issue, error) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		return Issue{}, fmt.Errorf("GET issue: decode response: %w", err)
 	}
-	description, err := adfToPlainText(payload.Fields.Description)
+	var fields issueFields
+	all := map[string]json.RawMessage{}
+	if len(payload.Fields) > 0 {
+		if err := json.Unmarshal(payload.Fields, &fields); err != nil {
+			return Issue{}, fmt.Errorf("GET issue: decode fields: %w", err)
+		}
+		if err := json.Unmarshal(payload.Fields, &all); err != nil {
+			return Issue{}, fmt.Errorf("GET issue: decode fields: %w", err)
+		}
+	}
+	description, err := adfToPlainText(fields.Description)
 	if err != nil {
 		return Issue{}, fmt.Errorf("GET issue: convert description: %w", err)
 	}
 	return Issue{
 		Key:            payload.Key,
-		Summary:        payload.Fields.Summary,
+		Summary:        fields.Summary,
 		Description:    description,
-		DescriptionADF: payload.Fields.Description,
+		DescriptionADF: fields.Description,
+		Fields:         all,
 	}, nil
 }
 

@@ -127,6 +127,7 @@ All settings are environment variables, read from `.env` when present. See
 | `WORKFLOW` | no | `scrum` | `scrum` or `bank` |
 | `REPOS_ROOT` | bank | | Folder holding the team's repositories |
 | `REPO_BASE_BRANCHES` | no | | `name=branch` overrides of the base branch, comma separated |
+| `REPOS_FIELD` | no | `Repositories` | Checkbox field whose options are the repository folder names |
 | `DOCS_DIR` | no | `REPOS_ROOT` | Where the RFC, FSD and runbook writers run |
 | `SKILLS_DIR` | no | `~/.claude/skills` | The user's Claude skills (`make-fsd`, `make-runbook`) |
 | `GITLAB_URL`, `GITLAB_TOKEN` | no | | Open merge requests in PR Review; an empty token turns this off |
@@ -134,9 +135,11 @@ All settings are environment variables, read from `.env` when present. See
 ## Bank workflow
 
 With `WORKFLOW=bank` the agent follows the bank's board instead of the PRD
-flow. One server runs per team; every ticket lists the repositories it
-changes as a checklist (`[]` in the Jira editor) in its description, using
-their folder names under `REPOS_ROOT`, with the changed ones ticked.
+flow. One server runs per team; every ticket ticks the repositories it
+changes in a **Repositories** checkbox field whose options are their folder
+names under `REPOS_ROOT`. Add the field to the project's issue types once.
+Without the field, or when it is empty, a checklist (`[]` in the Jira editor)
+in the description is read instead.
 
 | Status | What happens |
 | --- | --- |

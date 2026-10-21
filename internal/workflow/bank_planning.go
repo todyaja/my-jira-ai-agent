@@ -67,7 +67,7 @@ func ExecuteRequestTRD(ctx context.Context, key string, deps Dependencies) error
 	if err != nil {
 		return fail("get issue", err)
 	}
-	ticked, err := tickedRepos(issue, deps.Bank.Repos)
+	ticked, err := tickedRepos(issue, deps.Bank)
 	if err != nil {
 		return fail("select repositories", err)
 	}

@@ -131,6 +131,22 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		fieldName := strings.TrimSpace(os.Getenv("REPOS_FIELD"))
+		if fieldName == "" {
+			fieldName = "Repositories"
+		}
+		lookupContext, cancelLookup := context.WithTimeout(ctx, apiTimeout)
+		fieldID, found, err := jiraClient.FindFieldID(lookupContext, fieldName, os.Getenv("JIRA_PROJECT_KEY"))
+		cancelLookup()
+		switch {
+		case err != nil:
+			log.Printf("Warning: could not look up the %q field, so tickets name their repositories in a description checklist: %v", fieldName, err)
+		case !found:
+			log.Printf("No %q field in the project, so tickets name their repositories in a description checklist", fieldName)
+		default:
+			bank.RepoFieldID = fieldID
+			log.Printf("Tickets name their repositories in the %q field (%s), or else a description checklist", fieldName, fieldID)
+		}
 		poller.Dependencies.Bank = bank
 		poller.Workflow = workflow.BankWorkflow{}
 		log.Printf("Bank workflow: %d repositories under %s: %s", len(registry.Names()), registry.Root, strings.Join(registry.Names(), ", "))
