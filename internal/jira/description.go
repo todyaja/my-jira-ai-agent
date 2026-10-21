@@ -16,7 +16,22 @@ const (
 	managedUnderline = "============="
 )
 
-var managedHeadings = []string{prdHeading, trdHeading}
+// Headings of the managed sections the bank workflow adds; TRD is shared.
+const (
+	RFCHeading              = "RFC"
+	TRDHeading              = trdHeading
+	FSDHeading              = "FSD"
+	RunbookHeading          = "RUNBOOK"
+	RepositoryStatusHeading = "REPOSITORY STATUS"
+)
+
+var managedHeadings = []string{prdHeading, RFCHeading, trdHeading, FSDHeading, RunbookHeading, RepositoryStatusHeading}
+
+// DocumentLink is one labelled link in a managed section.
+type DocumentLink struct {
+	Label string
+	URL   string
+}
 
 type adfDocument struct {
 	Type    string            `json:"type"`
@@ -117,6 +132,31 @@ func AppendTRDLinkToADF(raw json.RawMessage, pageURL string) (json.RawMessage, e
 }
 
 func setDocumentLink(raw json.RawMessage, heading, pageURL string) (json.RawMessage, error) {
+	return setSection(raw, heading, []json.RawMessage{linkParagraph(pageURL)})
+}
+
+// SetDocumentLinks replaces the managed section under heading with one
+// paragraph per link, keeping the description above the managed block and
+// the other sections.
+func SetDocumentLinks(raw json.RawMessage, heading string, links []DocumentLink) (json.RawMessage, error) {
+	body := make([]json.RawMessage, 0, len(links))
+	for _, link := range links {
+		body = append(body, labelledLinkParagraph(link.Label, link.URL))
+	}
+	return setSection(raw, heading, body)
+}
+
+// SetRepositoryStatus replaces the repository status section with a table of
+// rows, the first of which is the header, followed by note when it is set.
+func SetRepositoryStatus(raw json.RawMessage, rows [][]string, note string) (json.RawMessage, error) {
+	body := []json.RawMessage{statusTable(rows)}
+	if strings.TrimSpace(note) != "" {
+		body = append(body, textParagraph(note))
+	}
+	return setSection(raw, RepositoryStatusHeading, body)
+}
+
+func setSection(raw json.RawMessage, heading string, sectionBody []json.RawMessage) (json.RawMessage, error) {
 	if _, err := adfToPlainText(raw); err != nil {
 		return nil, err
 	}
@@ -157,7 +197,7 @@ func setDocumentLink(raw json.RawMessage, heading, pageURL string) (json.RawMess
 		document.Content = document.Content[:managedAt]
 	}
 
-	sections[heading] = []json.RawMessage{linkParagraph(pageURL)}
+	sections[heading] = sectionBody
 	for _, name := range managedHeadings {
 		body, ok := sections[name]
 		if !ok {
@@ -206,6 +246,42 @@ func linkParagraph(href string) json.RawMessage {
 		"marks": []any{map[string]any{"type": "link", "attrs": map[string]string{"href": href}}},
 	}
 	return mustJSON(adfNode{Type: "paragraph", Content: []json.RawMessage{mustJSON(link)}})
+}
+
+func labelledLinkParagraph(label, href string) json.RawMessage {
+	if strings.TrimSpace(label) == "" {
+		return linkParagraph(href)
+	}
+	link := map[string]any{
+		"type":  "text",
+		"text":  href,
+		"marks": []any{map[string]any{"type": "link", "attrs": map[string]string{"href": href}}},
+	}
+	return mustJSON(adfNode{Type: "paragraph", Content: []json.RawMessage{mustJSON(adfNode{Type: "text", Text: label + ": "}), mustJSON(link)}})
+}
+
+// statusTable builds an ADF table whose first row is the header. A cell
+// that is a URL becomes a link.
+func statusTable(rows [][]string) json.RawMessage {
+	tableRows := make([]json.RawMessage, 0, len(rows))
+	for index, row := range rows {
+		cellType := "tableCell"
+		if index == 0 {
+			cellType = "tableHeader"
+		}
+		cells := make([]json.RawMessage, 0, len(row))
+		for _, cell := range row {
+			paragraph := textParagraph(cell)
+			if strings.HasPrefix(cell, "http://") || strings.HasPrefix(cell, "https://") {
+				paragraph = linkParagraph(cell)
+			} else if cell == "" {
+				paragraph = mustJSON(adfNode{Type: "paragraph"})
+			}
+			cells = append(cells, mustJSON(adfNode{Type: cellType, Content: []json.RawMessage{paragraph}}))
+		}
+		tableRows = append(tableRows, mustJSON(adfNode{Type: "tableRow", Content: cells}))
+	}
+	return mustJSON(adfNode{Type: "table", Content: tableRows})
 }
 
 func adfNodePlainText(raw json.RawMessage) (string, error) {
