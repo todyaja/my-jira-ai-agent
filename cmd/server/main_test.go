@@ -129,3 +129,28 @@ func TestLoadGitHubClient(t *testing.T) {
 		t.Fatal("loadGitHubClient() without a repository succeeded, want an error")
 	}
 }
+
+func TestLoadPortAndWorkflow(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	if port, err := loadPort(env(nil)); err != nil || port != "8080" {
+		t.Fatalf("loadPort() default = %q, %v", port, err)
+	}
+	if port, err := loadPort(env(map[string]string{"PORT": " 8082 "})); err != nil || port != "8082" {
+		t.Fatalf("loadPort(8082) = %q, %v", port, err)
+	}
+	for _, bad := range []string{"http", "0", "70000"} {
+		if _, err := loadPort(env(map[string]string{"PORT": bad})); err == nil {
+			t.Fatalf("loadPort(%q) succeeded", bad)
+		}
+	}
+	for value, want := range map[string]bool{"": false, "scrum": false, " Bank ": true} {
+		if got, err := isBankWorkflow(env(map[string]string{"WORKFLOW": value})); err != nil || got != want {
+			t.Fatalf("isBankWorkflow(%q) = %t, %v", value, got, err)
+		}
+	}
+	if _, err := isBankWorkflow(env(map[string]string{"WORKFLOW": "kanban"})); err == nil {
+		t.Fatal("isBankWorkflow(kanban) succeeded")
+	}
+}

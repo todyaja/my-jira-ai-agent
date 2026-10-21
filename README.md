@@ -121,11 +121,41 @@ All settings are environment variables, read from `.env` when present. See
 | `CLAUDE_PLANNING_TIMEOUT_SECONDS` | no | `900` | Technical planner time limit |
 | `CLAUDE_IMPLEMENTATION_TIMEOUT_SECONDS` | no | `1800` | Software engineer time limit |
 | `CLAUDE_REVIEW_TIMEOUT_SECONDS` | no | `900` | Code reviewer time limit |
-| `CLAUDE_ALLOWED_COMMANDS` | no | npm/npx test, lint, build; read-only git | Comma-separated command prefixes the engineer and reviewer may run |
-| `MAX_REVIEW_CYCLES` | no | `3` | AI review rounds before the issue moves to PR Ready anyway |
+| `CLAUDE_ALLOWED_COMMANDS` | no | read-only git | Extra command prefixes the engineer and reviewer may run besides the detected checks |
+| `MAX_REVIEW_CYCLES` | no | `3` | AI review rounds before the issue moves on anyway |
+| `PORT` | no | `8080` | Health endpoint port; one per server on a machine |
+| `WORKFLOW` | no | `scrum` | `scrum` or `bank` |
+| `REPOS_ROOT` | bank | | Folder holding the team's repositories |
+| `REPO_BASE_BRANCHES` | no | | `name=branch` overrides of the base branch, comma separated |
+| `DOCS_DIR` | no | `REPOS_ROOT` | Where the RFC, FSD and runbook writers run |
+| `SKILLS_DIR` | no | `~/.claude/skills` | The user's Claude skills (`make-fsd`, `make-runbook`) |
+| `GITLAB_URL`, `GITLAB_TOKEN` | no | | Open merge requests in PR Review; an empty token turns this off |
 
-The HTTP server always listens on `:8080`; `PORT` in `.env.example` is not
-read yet.
+## Bank workflow
+
+With `WORKFLOW=bank` the agent follows the bank's board instead of the PRD
+flow. One server runs per team; every ticket lists the repositories it
+changes as a checklist (`[]` in the Jira editor) in its description, using
+their folder names under `REPOS_ROOT`, with the changed ones ticked.
+
+| Status | What happens |
+| --- | --- |
+| Request RFC | The `rfc-writer` agent reads the current code and writes the RFC with the `make-fsd` skill. It is filed in Confluence under *RFCs > RFCs <year>* with the Word file attached, labelled with the issue key, and linked from the issue. Moves to RFC Review. |
+| Request TRD | The `repo-planner` agent writes an overview TRD (cross-repository contracts, end-to-end flow, merge order) and one TRD per ticked repository, titled `<key> [<repo>] <what changes>`, under *TRDs > TRDs <year> > <overview>*. Moves to TRD Review. |
+| Ready To Implement | Starts a cycle per repository on branch `feature/<key>`. Moves to Implementing. |
+| Implementing | The engineer works in every repository still under review, in parallel, each in its own worktree, writing unit tests for everything it adds or changes. Moves to AI Review. |
+| AI Review | Each repository is reviewed against its TRD. Repositories with changes requested go back to Implementing; once all are approved (or out of rounds) the branches are pushed and the issue moves to Engineer Review. |
+| PR Review | One GitLab merge request per changed repository. The issue stays for the reviewers. |
+| FSD Request | The `fsd-writer` agent writes the FSD from the RFC, the TRDs and the implemented code, filed under *FSDs > FSDs <year>*. Moves to FSD Review. |
+| Runbook Request | The `runbook-writer` agent writes the deployment runbook, filed under *Runbooks > Runbooks <year>*. Moves to Runbook Review. |
+
+The review statuses, Engineer Review, Development Done and Go Live are
+people's steps. A failed step moves the issue to AI ERROR. Each repository's
+progress, branch and merge request is kept in a status table at the end of
+the description. Reviewers ask for document changes with comments starting
+`!rfc-writer`, `!tech-planner`, `!fsd-writer` or `!runbook-writer` and move
+the issue back to the request status. The application is never run: checks
+are unit tests (`mvn -q -B test` for Maven).
 
 ## Project layout
 

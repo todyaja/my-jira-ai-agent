@@ -44,18 +44,26 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	port, err := loadPort(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	bankFlow, err := isBankWorkflow(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
 	agents, err := buildAgents(os.Getenv)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := agents.planner.CheckRepository(); err != nil {
+	if err := agents.planner.CheckRepository(); err != nil && !bankFlow {
 		log.Printf("Warning: the Planning step will fail until this is fixed: %v", err)
 	}
 	workspace, err := loadWorkspace(os.Getenv)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := workspace.Check(context.Background()); err != nil {
+	if err := workspace.Check(context.Background()); err != nil && !bankFlow {
 		log.Printf("Warning: the Implementing and AI Review steps will fail until this is fixed: %v", err)
 	}
 	maxReviewCycles, err := loadMaxReviewCycles(os.Getenv)
@@ -70,7 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if pullRequests == nil {
+	if pullRequests == nil && !bankFlow {
 		log.Println("Warning: GITHUB_TOKEN is not configured, so issues reaching PR Ready get no pull request")
 	}
 	jiraClient := jira.NewClient(
@@ -88,9 +96,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	server := &http.Server{Addr: ":8080", Handler: mux}
+	server := &http.Server{Addr: ":" + port, Handler: mux}
 	go func() {
-		log.Println("Jira AI Agent listening on :8080")
+		log.Printf("Jira AI Agent listening on :%s", port)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}
@@ -117,6 +125,18 @@ func main() {
 	// would not read as nil.
 	if pullRequests != nil {
 		poller.Dependencies.PullRequests = pullRequests
+	}
+	if bankFlow {
+		bank, registry, err := loadBankDependencies(os.Getenv, confluenceClient)
+		if err != nil {
+			log.Fatal(err)
+		}
+		poller.Dependencies.Bank = bank
+		poller.Workflow = workflow.BankWorkflow{}
+		log.Printf("Bank workflow: %d repositories under %s: %s", len(registry.Names()), registry.Root, strings.Join(registry.Names(), ", "))
+		if bank.MergeRequests == nil {
+			log.Println("Warning: GITLAB_TOKEN is not configured, so issues reaching PR Review get no merge requests")
+		}
 	}
 	log.Printf("Polling Jira every %s: %s", pollInterval, poller.JQL)
 	poller.Run(ctx, pollInterval)
@@ -238,6 +258,31 @@ func loadGitHubClient(getenv func(string) string, baseBranch string) (*github.Cl
 		Base:       baseBranch,
 		HTTPClient: &http.Client{Timeout: apiTimeout},
 	}, nil
+}
+
+// loadPort reads PORT, the health endpoint's port, so one server per team
+// can run on the same machine.
+func loadPort(getenv func(string) string) (string, error) {
+	value := strings.TrimSpace(getenv("PORT"))
+	if value == "" {
+		return "8080", nil
+	}
+	if port, err := strconv.Atoi(value); err != nil || port <= 0 || port > 65535 {
+		return "", fmt.Errorf("PORT must be a port number")
+	}
+	return value, nil
+}
+
+// isBankWorkflow reads WORKFLOW: "scrum" (the default) or "bank".
+func isBankWorkflow(getenv func(string) string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(getenv("WORKFLOW"))) {
+	case "", "scrum":
+		return false, nil
+	case "bank":
+		return true, nil
+	default:
+		return false, fmt.Errorf("WORKFLOW must be scrum or bank")
+	}
 }
 
 func loadPollInterval(getenv func(string) string) (time.Duration, error) {

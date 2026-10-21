@@ -10,7 +10,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
+
+	"github.com/tody-aja/jira-ai-agent/internal/repos"
 )
 
 // Client opens merge requests on one GitLab instance. BaseURL is the
@@ -121,4 +124,23 @@ func (c *Client) sendJSON(ctx context.Context, method, path, operation string, r
 		return fmt.Errorf("%s: decode response: %w", operation, err)
 	}
 	return nil
+}
+
+// RepoOpener opens merge requests for repositories, finding each one's
+// GitLab project from its origin remote.
+type RepoOpener struct {
+	Client *Client
+}
+
+func (o RepoOpener) OpenMergeRequest(ctx context.Context, repo repos.Repo, source, target, title, description string) (string, error) {
+	command := exec.CommandContext(ctx, "git", "-C", repo.Path, "remote", "get-url", "origin")
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("read the origin remote of %s: %w", repo.Name, err)
+	}
+	project, err := ProjectPath(string(output))
+	if err != nil {
+		return "", err
+	}
+	return o.Client.OpenMergeRequest(ctx, project, source, target, title, description)
 }
