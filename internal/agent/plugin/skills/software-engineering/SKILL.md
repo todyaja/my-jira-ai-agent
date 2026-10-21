@@ -9,6 +9,7 @@ description: How to implement an approved TRD, or address an AI code review, the
 - Read the TRD completely; it is your plan. The PRD explains why, and its acceptance criteria define done.
 - Read every file the TRD names before changing it, plus its tests and its callers. Read the README and manifest (`package.json`, `go.mod`, ...) to learn the scripts, test runner and lint setup.
 - Run `git status` and `git log` to see what the branch already contains.
+- When the request has **Workflow notes**, follow them; they win over this skill where the two differ.
 - The request lists this repository's checks, where they run (in Docker or on this machine), and any setup command to run first because dependencies are missing. Use exactly those commands; do not install dependencies or run checks any other way.
 
 ## 2. Implement
@@ -20,7 +21,7 @@ Follow the TRD's **Implementation Plan** in order. For each step:
 - Write code that is correct at the edges: empty and missing values, invalid input, boundaries, time zones and ordering when relevant.
 - Keep types strict: no `any`, unchecked casts or disabled lint rules to make something compile.
 - Do not add dependencies unless the TRD calls for them.
-- Add or update tests alongside the code, following the **Testing Strategy** and the repository's existing test style. Test behavior, not implementation details. Cover every acceptance criterion.
+- Add or update tests alongside the code, following the **Testing Strategy** and the repository's existing test style. Every class or function you add or change must be covered by a unit test, even where the repository has few or none: add the test setup its build tool expects if it is missing. Test behavior, not implementation details. Cover every acceptance criterion.
 - Keep comments rare and useful: explain why, never restate what the code does.
 
 If the TRD is wrong or impossible in a detail (a file or function is not as it describes), choose the approach closest to its intent, and report the deviation.

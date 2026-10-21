@@ -74,13 +74,17 @@ func (d checkDetector) detect(ctx context.Context, dir string) Checks {
 }
 
 // localChecks reads the checks from the project's manifest: package.json
-// scripts for Node, the standard tools for Go.
+// scripts for Node, the standard tools for Go, and the test phase for Maven.
 func localChecks(dir string) Checks {
 	if fileExists(filepath.Join(dir, "package.json")) {
 		return nodeChecks(dir)
 	}
 	if fileExists(filepath.Join(dir, "go.mod")) {
 		return Checks{Commands: []string{"go build ./...", "go vet ./...", "go test ./..."}}
+	}
+	if fileExists(filepath.Join(dir, "pom.xml")) {
+		// test compiles the code and runs the unit tests through surefire.
+		return Checks{Commands: []string{"mvn -q -B test"}}
 	}
 	return Checks{}
 }

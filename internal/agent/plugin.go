@@ -27,6 +27,17 @@ const SoftwareEngineerAgent = PluginName + ":software-engineer"
 // CodeReviewerAgent is the agent for the AI Review step.
 const CodeReviewerAgent = PluginName + ":code-reviewer"
 
+// RepoPlannerAgent writes the overview and per-repository TRDs of the bank
+// workflow's Request TRD step.
+const RepoPlannerAgent = PluginName + ":repo-planner"
+
+// The bank document writers, built on the bank's Word templates.
+const (
+	RFCWriterAgent     = PluginName + ":rfc-writer"
+	FSDWriterAgent     = PluginName + ":fsd-writer"
+	RunbookWriterAgent = PluginName + ":runbook-writer"
+)
+
 // The all: prefix keeps the .claude-plugin manifest directory.
 //
 //go:embed all:plugin

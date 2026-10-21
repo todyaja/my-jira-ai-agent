@@ -109,9 +109,18 @@ func (e *ClaudeEngineer) Implement(ctx context.Context, input workflow.Implement
 
 func implementPrompt(input workflow.ImplementInput, checks Checks, commands []string) string {
 	if strings.TrimSpace(input.Review) == "" {
-		return fmt.Sprintf(claudeImplementPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD) + checksSection(checks, commands)
+		return fmt.Sprintf(claudeImplementPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD) + contextSection(input.Context) + checksSection(checks, commands)
 	}
-	return fmt.Sprintf(claudeAddressReviewPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, input.Review) + checksSection(checks, commands)
+	return fmt.Sprintf(claudeAddressReviewPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, input.Review) + contextSection(input.Context) + checksSection(checks, commands)
+}
+
+// contextSection adds the workflow's own instructions, such as which
+// repository of a multi-repository change this is.
+func contextSection(context string) string {
+	if strings.TrimSpace(context) == "" {
+		return ""
+	}
+	return "\n\nWorkflow notes:\n" + strings.TrimSpace(context)
 }
 
 // checksSection tells the agent where the checks run and the exact commands
@@ -249,7 +258,7 @@ func reviewPrompt(input workflow.ReviewInput, checks Checks, commands []string) 
 	if strings.TrimSpace(diff) == "" {
 		diff = "(no changes on the branch)"
 	}
-	return fmt.Sprintf(claudeReviewPrompt, input.Branch, input.Round, input.MaxRounds, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, previous, diff, checksSection(checks, commands))
+	return fmt.Sprintf(claudeReviewPrompt, input.Branch, input.Round, input.MaxRounds, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, previous, diff, contextSection(input.Context)+checksSection(checks, commands))
 }
 
 func commandsOrDefault(commands []string) []string {

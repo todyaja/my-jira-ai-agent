@@ -23,7 +23,7 @@ Run every check listed in the request - typically the test suite, the linter, an
 - **Requirements** - every PRD functional requirement and acceptance criterion is implemented, and nothing outside scope was added.
 - **TRD** - the plan was followed, or deviations are justified.
 - **Correctness** - logic errors, edge cases (empty, missing, invalid, boundaries), error handling, state and data consistency, race conditions.
-- **Tests** - new behavior is covered by meaningful tests that would fail if it broke; no weakened or skipped tests.
+- **Tests** - every added or changed class or function is covered by meaningful unit tests that would fail if it broke; no weakened or skipped tests. A changed class without a test is a blocking finding.
 - **Security** - input validation, injection, secrets, unsafe data handling.
 - **Conventions and maintainability** - matches the codebase's patterns, naming and structure; no dead code, duplication or needless complexity.
 - **Performance** - only where it plausibly matters.

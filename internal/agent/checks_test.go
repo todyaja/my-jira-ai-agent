@@ -124,6 +124,11 @@ func TestLocalChecksFollowTheProject(t *testing.T) {
 			wantCommands: []string{"go build ./...", "go vet ./...", "go test ./..."},
 		},
 		{
+			name:         "maven project",
+			files:        map[string]string{"pom.xml": "<project/>"},
+			wantCommands: []string{"mvn -q -B test"},
+		},
+		{
 			name:  "unknown project",
 			files: map[string]string{"README.md": "hello"},
 		},

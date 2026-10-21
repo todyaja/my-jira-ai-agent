@@ -148,6 +148,8 @@ type claudeRun struct {
 	// jsonSchema, when set, makes the agent answer with structured output
 	// matching it.
 	jsonSchema string
+	// addDirs are directories the agent may use besides dir.
+	addDirs []string
 }
 
 // run executes one agent with only the given tools, in dir, and returns its
@@ -218,6 +220,9 @@ func (c claudeCLI) args(spec claudeRun) []string {
 	}
 	if spec.jsonSchema != "" {
 		args = append(args, "--json-schema", spec.jsonSchema)
+	}
+	for _, dir := range spec.addDirs {
+		args = append(args, "--add-dir", dir)
 	}
 	return args
 }

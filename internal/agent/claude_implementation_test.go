@@ -140,3 +140,20 @@ func TestPromptsListChecksAndAllowedCommands(t *testing.T) {
 		t.Fatalf("checksSection() = %q, want it to say no checks were found", none)
 	}
 }
+
+func TestPromptsIncludeWorkflowNotes(t *testing.T) {
+	notes := "You are working in bnc_busi only. Cover every change with unit tests."
+	implement := implementPrompt(workflow.ImplementInput{Context: notes}, Checks{}, nil)
+	review := reviewPrompt(workflow.ReviewInput{Context: notes}, Checks{}, nil)
+	for name, got := range map[string]string{"implementPrompt": implement, "reviewPrompt": review} {
+		if !strings.Contains(got, "Workflow notes:\n"+notes) {
+			t.Fatalf("%s() = %q, want the workflow notes", name, got)
+		}
+	}
+	if !strings.HasSuffix(strings.TrimSpace(review), `"review": "<the review in Markdown>"}.`) {
+		t.Fatal("the workflow notes moved the reviewer's JSON instruction")
+	}
+	if strings.Contains(implementPrompt(workflow.ImplementInput{}, Checks{}, nil), "Workflow notes") {
+		t.Fatal("an empty context added a notes section")
+	}
+}
