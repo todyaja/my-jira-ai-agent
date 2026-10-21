@@ -16,7 +16,7 @@ description: How to review an issue's branch against its PRD and TRD - what to c
 
 ## 3. Verify, do not assume
 
-Run the repository's checks - the test suite, the linter, and the type check or build. If dependencies are missing and you cannot install them, say which checks you could not run. A failing check is a blocking finding.
+Run every check listed in the request - typically the test suite, the linter, and the type check or build - exactly as written, after its setup command if it lists one. If a check cannot run, say which one and why. A failing check is a blocking finding.
 
 ## 4. What to look for
 

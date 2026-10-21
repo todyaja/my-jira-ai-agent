@@ -9,7 +9,7 @@ description: How to implement an approved TRD, or address an AI code review, the
 - Read the TRD completely; it is your plan. The PRD explains why, and its acceptance criteria define done.
 - Read every file the TRD names before changing it, plus its tests and its callers. Read the README and manifest (`package.json`, `go.mod`, ...) to learn the scripts, test runner and lint setup.
 - Run `git status` and `git log` to see what the branch already contains.
-- If dependencies are not installed in this worktree (for example no `node_modules`), install them with the lockfile-respecting command (`npm ci`, falling back to `npm install` when there is no lockfile).
+- The request lists this repository's checks, where they run (in Docker or on this machine), and any setup command to run first because dependencies are missing. Use exactly those commands; do not install dependencies or run checks any other way.
 
 ## 2. Implement
 
@@ -27,7 +27,7 @@ If the TRD is wrong or impossible in a detail (a file or function is not as it d
 
 ## 3. Verify
 
-Before you finish, run the checks the repository has - typically the test suite, the linter, and the type check or build - and fix what fails. Never weaken, skip or delete a test to make it pass. If a check cannot run (for example a command is refused), say so in the summary rather than claiming it passed.
+Before you finish, run every check listed in the request - typically the test suite, the linter, and the type check or build - and fix what fails. Never weaken, skip or delete a test to make it pass. If a check cannot run (for example a command is refused), say so in the summary rather than claiming it passed.
 
 ## Addressing a review
 
