@@ -26,11 +26,13 @@ type answerSection struct {
 }
 
 // parseSections splits an answer into its marked sections. Text before the
-// first marker is ignored.
+// first marker is ignored, and so is a marker inside a fenced code block,
+// where a document may show the format as an example.
 func parseSections(answer string) []answerSection {
 	sections := []answerSection{}
 	var current *answerSection
 	var body []string
+	inFence := false
 	flush := func() {
 		if current != nil {
 			current.Body = strings.TrimSpace(strings.Join(body, "\n"))
@@ -38,8 +40,12 @@ func parseSections(answer string) []answerSection {
 		}
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n") {
-		match := sectionMarker.FindStringSubmatch(strings.TrimSpace(line))
-		if match == nil {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+		}
+		match := sectionMarker.FindStringSubmatch(trimmed)
+		if match == nil || inFence {
 			body = append(body, line)
 			continue
 		}
@@ -148,7 +154,19 @@ func parsePlan(answer string) (workflow.PlanResult, error) {
 			}
 		case "REPO":
 			name, title, _ := strings.Cut(section.Argument, "|")
-			result.Repos = append(result.Repos, workflow.RepoTRD{Repo: strings.TrimSpace(name), Title: strings.TrimSpace(title), TRD: section.Body})
+			name, title = strings.TrimSpace(name), strings.TrimSpace(title)
+			// A TRD split over several sections is joined; the first
+			// section names it.
+			merged := false
+			for index := range result.Repos {
+				if strings.EqualFold(result.Repos[index].Repo, name) {
+					result.Repos[index].TRD += "\n\n" + section.Body
+					merged = true
+				}
+			}
+			if !merged {
+				result.Repos = append(result.Repos, workflow.RepoTRD{Repo: name, Title: title, TRD: section.Body})
+			}
 		}
 	}
 	if result.Overview == "" || len(result.Repos) == 0 {

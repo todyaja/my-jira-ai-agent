@@ -117,3 +117,17 @@ func TestDocumentWriterArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePlanJoinsSplitTRDsAndIgnoresFencedMarkers(t *testing.T) {
+	answer := "<<<OVERVIEW>>>\nOverview.\n```text\n<<<REPO name | example of the format>>>\n```\n<<<REPO bnc_busi | Remark hapus buku>>>\n## Summary\nPart one.\n<<<REPO BNC_BUSI | ignored title>>>\n## Testing Strategy\nPart two.\n<<<MERGE ORDER>>>\nbnc_busi"
+	plan, err := parsePlan(answer)
+	if err != nil {
+		t.Fatalf("parsePlan() error = %v", err)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0].Title != "Remark hapus buku" || plan.Repos[0].TRD != "## Summary\nPart one.\n\n## Testing Strategy\nPart two." {
+		t.Fatalf("repos = %+v, want one bnc_busi TRD joined from both parts", plan.Repos)
+	}
+	if !strings.Contains(plan.Overview, "<<<REPO name | example of the format>>>") {
+		t.Fatalf("overview = %q, want the fenced example kept as text", plan.Overview)
+	}
+}
