@@ -40,6 +40,9 @@ type transitionsResponse struct {
 	Transitions []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		To   struct {
+			Name string `json:"name"`
+		} `json:"to"`
 	} `json:"transitions"`
 }
 
@@ -108,6 +111,10 @@ func (c *Client) UpdateDescription(ctx context.Context, key string, description 
 	return err
 }
 
+// TransitionTo moves the issue to the status named statusName. A transition
+// into that status is used whatever it is called; failing that, one named
+// statusName, since boards may name a transition differently from its status
+// (e.g. "Review" into Engineer Review).
 func (c *Client) TransitionTo(ctx context.Context, key, statusName string) error {
 	request, err := c.newRequest(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(key)+"/transitions", nil)
 	if err != nil {
@@ -126,9 +133,14 @@ func (c *Client) TransitionTo(ctx context.Context, key, statusName string) error
 	}
 	transitionID := ""
 	for _, transition := range payload.Transitions {
-		if strings.EqualFold(transition.Name, statusName) {
+		if strings.EqualFold(strings.TrimSpace(transition.To.Name), strings.TrimSpace(statusName)) {
 			transitionID = transition.ID
 			break
+		}
+	}
+	for _, transition := range payload.Transitions {
+		if transitionID == "" && strings.EqualFold(transition.Name, statusName) {
+			transitionID = transition.ID
 		}
 	}
 	if transitionID == "" {

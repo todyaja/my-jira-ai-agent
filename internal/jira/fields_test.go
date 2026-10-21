@@ -70,3 +70,30 @@ func TestFindFieldIDPrefersTheProjectsOwnField(t *testing.T) {
 		t.Fatalf("FindFieldID() found = %t, %v, want not found", found, err)
 	}
 }
+
+func TestTransitionToMatchesTheTargetStatus(t *testing.T) {
+	var posted string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// The transition into Engineer Review is named "Review", and one
+			// named like a status leads elsewhere.
+			io.WriteString(w, `{"transitions":[{"id":"7","name":"Engineer Review","to":{"name":"Back Log"}},{"id":"9","name":"Review","to":{"name":"Engineer Review"}},{"id":"11","name":"Go Live","to":{"name":"Go Live"}}]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		posted = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL}
+
+	if err := client.TransitionTo(context.Background(), "NBS-6", "engineer review"); err != nil || posted != `{"transition":{"id":"9"}}` {
+		t.Fatalf("TransitionTo(Engineer Review) posted %s, %v; want the transition into that status", posted, err)
+	}
+	if err := client.TransitionTo(context.Background(), "NBS-6", "Go Live"); err != nil || posted != `{"transition":{"id":"11"}}` {
+		t.Fatalf("TransitionTo(Go Live) posted %s, %v", posted, err)
+	}
+	if err := client.TransitionTo(context.Background(), "NBS-6", "Done"); err == nil {
+		t.Fatal("TransitionTo(Done) succeeded without such a transition")
+	}
+}
