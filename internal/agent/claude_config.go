@@ -52,7 +52,7 @@ func LoadClaudeConfig(getenv func(string) string) (ClaudeConfig, error) {
 }
 
 // loadAllowedCommands reads CLAUDE_ALLOWED_COMMANDS, a comma-separated list
-// of command prefixes, defaulting to DefaultAllowedCommands.
+// of extra command prefixes, defaulting to DefaultAllowedCommands.
 func loadAllowedCommands(getenv func(string) string) ([]string, error) {
 	value := strings.TrimSpace(getenv("CLAUDE_ALLOWED_COMMANDS"))
 	if value == "" {

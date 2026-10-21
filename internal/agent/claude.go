@@ -24,11 +24,9 @@ const (
 )
 
 // DefaultAllowedCommands are the shell command prefixes the engineer and
-// reviewer may run: installing dependencies, testing, linting, building and
-// reading git history. Nothing that commits or pushes.
+// reviewer may run besides the checks worked out from the worktree (see
+// Checks): reading git history. Nothing that commits or pushes.
 var DefaultAllowedCommands = []string{
-	"npm ci", "npm install", "npm test", "npm run lint", "npm run build",
-	"npx vitest", "npx tsc", "npx eslint",
 	"git status", "git diff", "git log", "git show",
 }
 
@@ -64,7 +62,7 @@ type ClaudeConfig struct {
 	ImplementationTimeout time.Duration
 	ReviewTimeout         time.Duration
 	// AllowedCommands are the shell command prefixes the engineer and
-	// reviewer may run.
+	// reviewer may run besides the worktree's checks.
 	AllowedCommands []string
 }
 

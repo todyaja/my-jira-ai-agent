@@ -57,7 +57,7 @@ Earlier reviews in this cycle, oldest first:
 %s
 
 Changes on the branch against the base branch:
-%s
+%s%s
 
 Finish with exactly one JSON object and nothing else: {"verdict": "approved" or "changes_requested", "review": "<the review in Markdown>"}.`
 
@@ -80,6 +80,7 @@ type ClaudeEngineer struct {
 	cli             claudeCLI
 	timeout         time.Duration
 	allowedCommands []string
+	checks          checkDetector
 }
 
 func NewClaudeEngineer(config ClaudeConfig) (*ClaudeEngineer, error) {
@@ -87,28 +88,55 @@ func NewClaudeEngineer(config ClaudeConfig) (*ClaudeEngineer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeEngineer{cli: cli, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands)}, nil
+	return &ClaudeEngineer{cli: cli, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands), checks: newCheckDetector()}, nil
 }
 
 // Implement runs the engineer in the worktree. File edits there are accepted
-// automatically and only the allowed commands may run.
+// automatically and only the worktree's checks and the allowed commands may
+// run.
 func (e *ClaudeEngineer) Implement(ctx context.Context, input workflow.ImplementInput) (string, error) {
+	checks := e.checks.detect(ctx, input.Dir)
 	return e.cli.run(ctx, claudeRun{
 		agent:          SoftwareEngineerAgent,
 		tools:          engineerTools,
 		dir:            input.Dir,
-		prompt:         implementPrompt(input),
+		prompt:         implementPrompt(input, checks, e.allowedCommands),
 		timeout:        e.timeout,
 		permissionMode: "acceptEdits",
-		allowedTools:   bashRules(e.allowedCommands),
+		allowedTools:   bashRules(append(checks.all(), e.allowedCommands...)),
 	})
 }
 
-func implementPrompt(input workflow.ImplementInput) string {
+func implementPrompt(input workflow.ImplementInput, checks Checks, commands []string) string {
 	if strings.TrimSpace(input.Review) == "" {
-		return fmt.Sprintf(claudeImplementPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD)
+		return fmt.Sprintf(claudeImplementPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD) + checksSection(checks, commands)
 	}
-	return fmt.Sprintf(claudeAddressReviewPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, input.Review)
+	return fmt.Sprintf(claudeAddressReviewPrompt, input.Branch, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, input.Review) + checksSection(checks, commands)
+}
+
+// checksSection tells the agent where the checks run and the exact commands
+// for them, so it does not guess a command that is refused or runs on the
+// wrong toolchain.
+func checksSection(checks Checks, commands []string) string {
+	var builder strings.Builder
+	if len(checks.Commands) == 0 {
+		builder.WriteString("\n\nNo checks were found for this repository (no test, lint, type check or build scripts). Say so in your summary.")
+	} else {
+		builder.WriteString("\n\nChecks for this repository run " + checks.Environment + ". Run them from the worktree root exactly as written:")
+		if len(checks.Setup) > 0 {
+			builder.WriteString("\n- First, because dependencies are not installed: " + strings.Join(checks.Setup, ", "))
+		}
+		for _, command := range checks.Commands {
+			builder.WriteString("\n- " + command)
+		}
+	}
+	builder.WriteString("\n\nOther shell commands you may run (each is a prefix; any other command is refused):")
+	for _, command := range commands {
+		if command = strings.TrimSpace(command); command != "" {
+			builder.WriteString("\n- " + command)
+		}
+	}
+	return builder.String()
 }
 
 // ClaudeReviewer reviews branches with the code-reviewer agent.
@@ -116,6 +144,7 @@ type ClaudeReviewer struct {
 	cli             claudeCLI
 	timeout         time.Duration
 	allowedCommands []string
+	checks          checkDetector
 }
 
 func NewClaudeReviewer(config ClaudeConfig) (*ClaudeReviewer, error) {
@@ -123,7 +152,7 @@ func NewClaudeReviewer(config ClaudeConfig) (*ClaudeReviewer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeReviewer{cli: cli, timeout: timeoutOrDefault(config.ReviewTimeout, DefaultClaudeReviewTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands)}, nil
+	return &ClaudeReviewer{cli: cli, timeout: timeoutOrDefault(config.ReviewTimeout, DefaultClaudeReviewTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands), checks: newCheckDetector()}, nil
 }
 
 type reviewAnswer struct {
@@ -134,13 +163,14 @@ type reviewAnswer struct {
 // Review runs the reviewer in the worktree without edit tools and returns
 // its verdict and review.
 func (r *ClaudeReviewer) Review(ctx context.Context, input workflow.ReviewInput) (workflow.ReviewResult, error) {
+	checks := r.checks.detect(ctx, input.Dir)
 	result, err := r.cli.runResult(ctx, claudeRun{
 		agent:        CodeReviewerAgent,
 		tools:        reviewerTools,
 		dir:          input.Dir,
-		prompt:       reviewPrompt(input),
+		prompt:       reviewPrompt(input, checks, r.allowedCommands),
 		timeout:      r.timeout,
-		allowedTools: bashRules(r.allowedCommands),
+		allowedTools: bashRules(append(checks.all(), r.allowedCommands...)),
 		jsonSchema:   reviewSchema,
 	})
 	if err != nil {
@@ -203,7 +233,7 @@ func jsonObject(text string) []byte {
 	return []byte(text[start : end+1])
 }
 
-func reviewPrompt(input workflow.ReviewInput) string {
+func reviewPrompt(input workflow.ReviewInput, checks Checks, commands []string) string {
 	previous := "(none - this is the first review)"
 	if len(input.PreviousReviews) > 0 {
 		var builder strings.Builder
@@ -219,7 +249,7 @@ func reviewPrompt(input workflow.ReviewInput) string {
 	if strings.TrimSpace(diff) == "" {
 		diff = "(no changes on the branch)"
 	}
-	return fmt.Sprintf(claudeReviewPrompt, input.Branch, input.Round, input.MaxRounds, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, previous, diff)
+	return fmt.Sprintf(claudeReviewPrompt, input.Branch, input.Round, input.MaxRounds, input.IssueKey, input.Summary, input.Description, input.PRD, input.TRD, previous, diff, checksSection(checks, commands))
 }
 
 func commandsOrDefault(commands []string) []string {

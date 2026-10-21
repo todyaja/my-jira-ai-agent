@@ -56,24 +56,24 @@ func containsPair(args, pair []string) bool {
 
 func TestImplementPromptSwitchesToReviewMode(t *testing.T) {
 	input := workflow.ImplementInput{IssueKey: "DEMO-1", Summary: "Export", Branch: "ai/DEMO-1", PRD: "<p>PRD</p>", TRD: "<p>TRD</p>"}
-	if got := implementPrompt(input); !strings.HasPrefix(got, "Implement the approved TRD") || !strings.Contains(got, "branch ai/DEMO-1") || !strings.Contains(got, "<p>TRD</p>") {
+	if got := implementPrompt(input, Checks{}, nil); !strings.HasPrefix(got, "Implement the approved TRD") || !strings.Contains(got, "branch ai/DEMO-1") || !strings.Contains(got, "<p>TRD</p>") {
 		t.Fatalf("implementPrompt() = %q, want TRD implementation prompt", got)
 	}
 	input.Review = "Blocking: add a test"
-	if got := implementPrompt(input); !strings.HasPrefix(got, "Address the AI code review") || !strings.Contains(got, "Blocking: add a test") {
+	if got := implementPrompt(input, Checks{}, nil); !strings.HasPrefix(got, "Address the AI code review") || !strings.Contains(got, "Blocking: add a test") {
 		t.Fatalf("implementPrompt() = %q, want review prompt", got)
 	}
 }
 
 func TestReviewPromptIncludesRoundHistoryAndDiff(t *testing.T) {
-	got := reviewPrompt(workflow.ReviewInput{Branch: "ai/DEMO-1", Round: 2, MaxRounds: 3, PreviousReviews: []string{"first review"}, Diff: "+added"})
+	got := reviewPrompt(workflow.ReviewInput{Branch: "ai/DEMO-1", Round: 2, MaxRounds: 3, PreviousReviews: []string{"first review"}, Diff: "+added"}, Checks{}, nil)
 	for _, want := range []string{"review round 2 of 3", "[Round 1 review]\nfirst review", "+added"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("reviewPrompt() = %q, want %q", got, want)
 		}
 	}
-	long := reviewPrompt(workflow.ReviewInput{Diff: strings.Repeat("x", maxPromptDiffRunes+1)})
-	if !strings.Contains(long, "diff truncated") || !strings.Contains(reviewPrompt(workflow.ReviewInput{}), "(no changes on the branch)") {
+	long := reviewPrompt(workflow.ReviewInput{Diff: strings.Repeat("x", maxPromptDiffRunes+1)}, Checks{}, nil)
+	if !strings.Contains(long, "diff truncated") || !strings.Contains(reviewPrompt(workflow.ReviewInput{}, Checks{}, nil), "(no changes on the branch)") {
 		t.Fatal("reviewPrompt() does not mark truncated or empty diffs")
 	}
 }
@@ -110,5 +110,33 @@ func TestDecodeReviewAnswer(t *testing.T) {
 		if _, err := decodeReviewAnswer(bad); err == nil {
 			t.Fatalf("decodeReviewAnswer(%+v) error = nil, want rejection", bad)
 		}
+	}
+}
+
+func TestPromptsListChecksAndAllowedCommands(t *testing.T) {
+	checks := Checks{Environment: "in Docker, in the app Docker Compose service", Commands: []string{"docker compose run --rm -T app npm run test"}}
+	commands := []string{"git diff", " "}
+	implement := implementPrompt(workflow.ImplementInput{Branch: "ai/DEMO-1"}, checks, commands)
+	review := reviewPrompt(workflow.ReviewInput{Branch: "ai/DEMO-1"}, checks, commands)
+	for name, got := range map[string]string{"implementPrompt": implement, "reviewPrompt": review} {
+		for _, want := range []string{"run in Docker, in the app Docker Compose service", "\n- docker compose run --rm -T app npm run test", "refused):\n- git diff"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s() = %q, want %q", name, got, want)
+			}
+		}
+		if strings.Contains(got, "\n- \n") || strings.Contains(got, "\n- First") {
+			t.Fatalf("%s() = %q, want no blank command or setup line", name, got)
+		}
+	}
+	if !strings.HasSuffix(strings.TrimSpace(review), `"review": "<the review in Markdown>"}.`) {
+		t.Fatalf("reviewPrompt() = %q, want the JSON instruction to stay last", review)
+	}
+
+	setup := checksSection(Checks{Environment: "on this machine", Setup: []string{"npm ci"}, Commands: []string{"npm run test"}}, nil)
+	if !strings.Contains(setup, "- First, because dependencies are not installed: npm ci\n- npm run test") {
+		t.Fatalf("checksSection() = %q, want the setup command before the checks", setup)
+	}
+	if none := checksSection(Checks{}, nil); !strings.Contains(none, "No checks were found") {
+		t.Fatalf("checksSection() = %q, want it to say no checks were found", none)
 	}
 }
