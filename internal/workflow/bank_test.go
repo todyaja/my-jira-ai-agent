@@ -596,3 +596,28 @@ func TestTickedReposPrefersTheRepositoriesField(t *testing.T) {
 		t.Fatalf("tickedRepos() error = %v, want the unknown option reported", err)
 	}
 }
+
+func TestBankAIReviewKeepsBranchesLocalWithoutGitLab(t *testing.T) {
+	f := newBankFake(t, "bnc_busi")
+	f.plan = PlanResult{Overview: "#", Repos: []RepoTRD{{Repo: "bnc_busi", TRD: "#"}}}
+	for _, status := range []string{"Request RFC", "Request TRD", "Ready To Implement"} {
+		f.status = status
+		if err := f.run(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deps := f.deps()
+	deps.Bank.MergeRequests = nil
+	for _, want := range []Status{BankAIReview, BankEngineerReview} {
+		step, _ := BankWorkflow{}.Step(f.status)
+		if err := step.Run(context.Background(), f.issue.Key, deps); err != nil || f.status != string(want) {
+			t.Fatalf("status = %q, %v, want %q", f.status, err, want)
+		}
+	}
+	if len(f.pushed) != 0 || len(f.removed) != 1 {
+		t.Fatalf("pushed %v removed %v, want nothing pushed and the worktree removed", f.pushed, f.removed)
+	}
+	if text := f.descriptionText(t); !strings.Contains(text, "branch ready (local)") {
+		t.Fatalf("description = %q, want the branch shown as local", text)
+	}
+}

@@ -22,7 +22,7 @@ const bankRepoContext = `This issue changes these repositories, in merge order: 
 
 The "PRD" above is the approved RFC for the whole change, and the "TRD" is the overview followed by the TRD for %s.
 
-The application cannot run locally, so verify the change with unit tests only - never start the application or call other systems. Every class or function you add or change must be covered by unit tests. If the repository has no unit tests yet, add the test setup its build tool expects (for Maven, JUnit tests under src/test/java and the test dependencies in pom.xml).`
+The application cannot run locally, so verify the change with unit tests only - never start the application or call other systems. In a multi-module Maven project, run only the modules you changed by appending -pl <module path> -am to the test command. Every class or function you add or change must be covered by unit tests. If the repository has no unit tests yet, add the test setup its build tool expects (for Maven, JUnit tests under src/test/java and the test dependencies in pom.xml).`
 
 type repoImplementation struct {
 	Repo       string         `json:"repo"`
@@ -222,7 +222,8 @@ type reviewOutcome struct {
 // ExecuteBankAIReview reviews every repository still under review, in
 // parallel, and posts one review per repository. When a repository has
 // changes requested and rounds left the issue goes back to Implementing;
-// otherwise every changed branch is pushed and the issue moves to Engineer
+// otherwise every changed branch is pushed - only when GitLab is configured,
+// so nothing leaves the machine otherwise - and the issue moves to Engineer
 // Review.
 func ExecuteBankAIReview(ctx context.Context, key string, deps Dependencies) error {
 	fail := failer(deps, "Review", key)
@@ -286,15 +287,16 @@ func ExecuteBankAIReview(ctx context.Context, key string, deps Dependencies) err
 				continue
 			}
 			_, workspace, err := work.repoWorkspace(repo.Repo, deps)
-			if err == nil {
-				err = workspace.Push(ctx, repo.Branch)
+			if err == nil && deps.Bank.MergeRequests != nil {
+				if err = workspace.Push(ctx, repo.Branch); err == nil {
+					repo.Pushed = true
+				}
 			}
 			if err != nil {
 				repo.Error = "push: " + err.Error()
 				failed = append(failed, repo.Repo)
 				continue
 			}
-			repo.Pushed = true
 			// The agents are done with the worktree; a leftover one is only
 			// clutter, so failing to remove it does not fail the review.
 			if err := workspace.Remove(ctx, repo.Branch); err != nil {
@@ -641,6 +643,8 @@ func mergeRequestCell(repo repoImplementation) string {
 		return "failed: " + repo.Error
 	case repo.Pushed:
 		return "branch pushed"
+	case repo.approved() && repo.Changed && !repo.NoChanges:
+		return "branch ready (local)"
 	default:
 		return "-"
 	}
