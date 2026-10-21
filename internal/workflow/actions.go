@@ -23,6 +23,8 @@ type Dependencies struct {
 	// JiraBaseURL, when set, links pull requests back to their issue.
 	JiraBaseURL string
 	Logger      *log.Logger
+	// Bank holds what only the bank workflow uses.
+	Bank BankDependencies
 }
 
 type action func(ctx context.Context, issueKey string) error

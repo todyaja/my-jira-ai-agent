@@ -45,6 +45,8 @@ type ImplementInput struct {
 	Branch string
 	// Review is the latest AI review to address; empty on the first round.
 	Review string
+	// Context, when set, adds workflow-specific instructions.
+	Context string
 }
 
 // Engineer changes the code in a worktree and returns a Markdown summary
@@ -68,6 +70,8 @@ type ReviewInput struct {
 	MaxRounds int
 	// PreviousReviews are the earlier reviews of this cycle, oldest first.
 	PreviousReviews []string
+	// Context, when set, adds workflow-specific instructions.
+	Context string
 }
 
 type ReviewResult struct {

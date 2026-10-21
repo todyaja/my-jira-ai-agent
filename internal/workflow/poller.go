@@ -47,6 +47,8 @@ type Poller struct {
 	JQL          string
 	Searcher     IssueSearcher
 	Dependencies Dependencies
+	// Workflow maps statuses to actions; nil means ScrumWorkflow.
+	Workflow Workflow
 
 	mu         sync.Mutex
 	inFlight   map[string]bool
@@ -98,22 +100,23 @@ func (p *Poller) Poll(ctx context.Context) {
 		if !p.claim(issue.Key, current) {
 			continue
 		}
-		status, ok := ParseStatus(current)
+		step, ok := p.workflow().Step(current)
 		if !ok {
 			logger.Printf("No workflow status matches %q: issue=%s", current, issue.Key)
 			p.release(issue.Key, true)
 			continue
 		}
+		status := step.Status
 
 		logger.Printf("Dispatching %s: status=%s", issue.Key, status)
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			err := Dispatch(ctx, status, issue.Key, p.Dependencies)
+			err := step.Run(ctx, issue.Key, p.Dependencies)
 			if err == nil {
 				logger.Printf("Workflow action succeeded: issue=%s status=%s", issue.Key, status)
 				// An AI action moves the issue on; a no-op leaves it where it is.
-				p.release(issue.Key, !HasAIAction(status))
+				p.release(issue.Key, !step.AI)
 				return
 			}
 			logger.Printf("Workflow action failed: issue=%s status=%s error=%v", issue.Key, status, err)
@@ -130,15 +133,23 @@ func (p *Poller) Poll(ctx context.Context) {
 // interrupted by shutdown are left in place so they resume on restart.
 func (p *Poller) moveToAIError(ctx context.Context, key string, status Status) bool {
 	logger := p.Dependencies.Logger
-	if ctx.Err() != nil || status == StatusAIError {
+	errorStatus := p.workflow().ErrorStatus()
+	if ctx.Err() != nil || strings.EqualFold(string(status), errorStatus) {
 		return false
 	}
-	if err := p.Dependencies.Writer.TransitionTo(ctx, key, string(StatusAIError)); err != nil {
-		logger.Printf("Move to %s failed, will retry: issue=%s error=%v", StatusAIError, key, err)
+	if err := p.Dependencies.Writer.TransitionTo(ctx, key, errorStatus); err != nil {
+		logger.Printf("Move to %s failed, will retry: issue=%s error=%v", errorStatus, key, err)
 		return false
 	}
-	logger.Printf("Moved to %s after failure: issue=%s status=%s", StatusAIError, key, status)
+	logger.Printf("Moved to %s after failure: issue=%s status=%s", errorStatus, key, status)
 	return true
+}
+
+func (p *Poller) workflow() Workflow {
+	if p.Workflow == nil {
+		return ScrumWorkflow{}
+	}
+	return p.Workflow
 }
 
 // changed reports whether an issue may need handling: no action for it is
