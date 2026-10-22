@@ -134,6 +134,37 @@ func (w *Workspace) Push(ctx context.Context, branch string) error {
 	return err
 }
 
+// Reference returns a detached worktree of BaseBranch, so agents that only
+// read the code (planners, document writers) see the base branch rather than
+// whatever the main checkout happens to be on. It is created on first use and
+// moved to BaseBranch's current commit on every call. Nothing should change
+// it, so any leftover change is discarded.
+func (w *Workspace) Reference(ctx context.Context) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.Check(ctx); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(w.Root, "base-"+strings.NewReplacer("/", "-", `\`, "-").Replace(w.BaseBranch))
+	if _, err := os.Stat(dir); err == nil {
+		if _, err := w.git(ctx, dir, "checkout", "--quiet", "--force", "--detach", "refs/heads/"+w.BaseBranch); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	if _, err := w.git(ctx, w.RepoPath, "worktree", "prune"); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(w.Root, 0o755); err != nil {
+		return "", fmt.Errorf("create worktree root: %w", err)
+	}
+	if _, err := w.git(ctx, w.RepoPath, "worktree", "add", "--quiet", "--detach", dir, "refs/heads/"+w.BaseBranch); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // worktreeDir is where branch's worktree lives: its name with path
 // separators turned into dashes, e.g. feature-ABC-1 for feature/ABC-1.
 func (w *Workspace) worktreeDir(branch string) string {

@@ -62,7 +62,7 @@ const repoPlannerTools = "Skill,Read,Grep,Glob"
 
 const claudeRepoPlanPrompt = `Write the TRDs for this Jira issue: one overview and one TRD for each repository it changes. Your working directory holds every repository of the team; read the code before proposing anything.
 
-Repositories this issue changes:
+Repositories this issue changes, as checkouts of their base branch (the code implementation starts from):
 %s
 
 Other repositories you may read for context but must not plan changes in:
@@ -185,7 +185,7 @@ var documentWriterCommands = []string{"node", "java", "git log", "git show", "gi
 
 const claudeDocumentPrompt = `Write the %s for this Jira issue with your skill, in Bahasa Indonesia, from the bank's Word template. Read the current code of the repositories involved first, so the document describes how they work today accurately.
 
-Repositories this issue changes:
+Repositories this issue changes, as checkouts of their base branch (the code implementation starts from):
 %s
 
 Other repositories you may read for context:

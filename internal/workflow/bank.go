@@ -213,3 +213,31 @@ func repoNames(list []repos.Repo) []string {
 	}
 	return names
 }
+
+// referenceCheckout is a workspace that can give a read-only checkout of
+// its base branch.
+type referenceCheckout interface {
+	Reference(ctx context.Context) (string, error)
+}
+
+// baseCheckouts returns the repositories with Path pointing at a checkout of
+// each one's base branch, so planners and document writers read the code
+// implementation will branch from, not whatever branch the main checkout is
+// on. Repositories whose workspace cannot give one keep their path.
+func baseCheckouts(ctx context.Context, bank BankDependencies, list []repos.Repo) ([]repos.Repo, error) {
+	if bank.Workspace == nil {
+		return list, nil
+	}
+	checked := make([]repos.Repo, 0, len(list))
+	for _, repo := range list {
+		if reference, ok := bank.Workspace(repo).(referenceCheckout); ok {
+			dir, err := reference.Reference(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("check out %s %s: %w", repo.Name, repo.BaseBranch, err)
+			}
+			repo.Path = dir
+		}
+		checked = append(checked, repo)
+	}
+	return checked, nil
+}

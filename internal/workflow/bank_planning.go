@@ -91,6 +91,9 @@ func ExecuteRequestTRD(ctx context.Context, key string, deps Dependencies) error
 		return bankTRDFeedback.skipRevision(ctx, key, deps.Writer, logger)
 	}
 
+	if ticked, err = baseCheckouts(ctx, deps.Bank, ticked); err != nil {
+		return fail("check out base branches", err)
+	}
 	input := PlanInput{
 		IssueKey:    issue.Key,
 		Summary:     issue.Summary,

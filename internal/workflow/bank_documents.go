@@ -168,6 +168,9 @@ func executeDocument(ctx context.Context, key string, kind documentKind, deps De
 	if err != nil {
 		return fail("get source documents", err)
 	}
+	if ticked, err = baseCheckouts(ctx, deps.Bank, ticked); err != nil {
+		return fail("check out base branches", err)
+	}
 
 	input := DocumentInput{
 		Kind:        kind.kind,

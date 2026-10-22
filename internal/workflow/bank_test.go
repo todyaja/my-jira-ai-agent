@@ -287,6 +287,10 @@ type fakeRepoWorkspace struct {
 	repo string
 }
 
+func (w *fakeRepoWorkspace) Reference(context.Context) (string, error) {
+	return "/reference/" + w.repo, nil
+}
+
 func (w *fakeRepoWorkspace) Prepare(context.Context, string) (string, error) {
 	return "/worktrees/" + w.repo, nil
 }
@@ -619,5 +623,27 @@ func TestBankAIReviewKeepsBranchesLocalWithoutGitLab(t *testing.T) {
 	}
 	if text := f.descriptionText(t); !strings.Contains(text, "branch ready (local)") {
 		t.Fatalf("description = %q, want the branch shown as local", text)
+	}
+}
+
+func TestBankDocumentsReadTheBaseBranch(t *testing.T) {
+	f := newBankFake(t, "bnc_busi", "sump-vue")
+	f.plan = PlanResult{Overview: "#", Repos: []RepoTRD{{Repo: "bnc_busi", TRD: "#"}, {Repo: "sump-vue", TRD: "#"}}}
+	for _, status := range []string{"Request RFC", "Request TRD"} {
+		f.status = status
+		if err := f.run(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, list := range map[string][]repos.Repo{"RFC": f.documents[0].Repos, "TRD": f.plans[0].Repos} {
+		for _, repo := range list {
+			if repo.Path != "/reference/"+repo.Name {
+				t.Fatalf("%s writer reads %s at %q, want the base branch checkout", name, repo.Name, repo.Path)
+			}
+		}
+	}
+	// Context repositories stay at their main checkout.
+	if all := f.documents[0].AllRepos; all[0].Path != "/codes/bnc_busi" {
+		t.Fatalf("AllRepos[0] = %+v, want the main checkout", all[0])
 	}
 }

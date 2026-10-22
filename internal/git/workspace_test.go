@@ -154,3 +154,53 @@ func TestWorkspacePushPublishesBranch(t *testing.T) {
 		t.Fatalf("Push() of a missing branch = %v, want does not exist", err)
 	}
 }
+
+func TestWorkspaceReferenceFollowsTheBaseBranch(t *testing.T) {
+	repo := newRepo(t)
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		output, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	// The main checkout is on another branch with its own change, as when a
+	// developer is working on something else.
+	run(repo, "checkout", "--quiet", "-b", "feature/other")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("other work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "commit", "--quiet", "--all", "--message", "other")
+
+	workspace := &Workspace{RepoPath: repo, BaseBranch: "main", Root: DefaultRoot(repo)}
+	ctx := context.Background()
+	dir, err := workspace.Reference(ctx)
+	if err != nil {
+		t.Fatalf("Reference() error = %v", err)
+	}
+	if content, _ := os.ReadFile(filepath.Join(dir, "README.md")); strings.ReplaceAll(string(content), "\r", "") != "hello\n" {
+		t.Fatalf("reference README = %q, want main's content", content)
+	}
+
+	// main moves on; a stray edit in the reference is discarded.
+	run(repo, "checkout", "--quiet", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("main v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "commit", "--quiet", "--all", "--message", "v2")
+	run(repo, "checkout", "--quiet", "feature/other")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("stray edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	again, err := workspace.Reference(ctx)
+	if err != nil || again != dir {
+		t.Fatalf("Reference() again = %q, %v, want the same directory", again, err)
+	}
+	if content, _ := os.ReadFile(filepath.Join(dir, "README.md")); strings.ReplaceAll(string(content), "\r", "") != "main v2\n" {
+		t.Fatalf("reference README = %q, want main's new content", content)
+	}
+	if branch := run(repo, "rev-parse", "--abbrev-ref", "HEAD"); branch != "feature/other" {
+		t.Fatalf("main checkout is on %q, want it left alone", branch)
+	}
+}

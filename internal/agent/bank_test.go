@@ -55,7 +55,7 @@ func TestBankPrompts(t *testing.T) {
 	all := append([]repos.Repo{{Name: "bnc_iobus", Path: `C:\Codes\bnc_iobus`, BaseBranch: "master"}}, changed...)
 
 	plan := repoPlanPrompt(workflow.PlanInput{IssueKey: "NBS-12", Summary: "Bulk", RFC: "<p>RFC</p>", Repos: changed, AllRepos: all})
-	for _, want := range []string{"changes:\n- bnc_busi: C:\\Codes\\bnc_busi_parent\\bnc_busi (base branch master)", "must not plan changes in:\n- bnc_iobus", "<p>RFC</p>", "<<<REPO name | what changes"} {
+	for _, want := range []string{"implementation starts from):\n- bnc_busi: C:\\Codes\\bnc_busi_parent\\bnc_busi (base branch master)", "must not plan changes in:\n- bnc_iobus", "<p>RFC</p>", "<<<REPO name | what changes"} {
 		if !strings.Contains(plan, want) {
 			t.Fatalf("repoPlanPrompt() = %q, want %q", plan, want)
 		}
