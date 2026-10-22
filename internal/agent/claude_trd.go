@@ -55,7 +55,7 @@ type ClaudeTRDGenerator struct {
 // NewClaudeTRDGenerator plans changes to the repository at repoPath, which
 // is resolved to an absolute path and checked on each run.
 func NewClaudeTRDGenerator(config ClaudeConfig, repoPath string) (*ClaudeTRDGenerator, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepTRD)
 	if err != nil {
 		return nil, err
 	}

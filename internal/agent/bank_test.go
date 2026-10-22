@@ -131,3 +131,46 @@ func TestParsePlanJoinsSplitTRDsAndIgnoresFencedMarkers(t *testing.T) {
 		t.Fatalf("overview = %q, want the fenced example kept as text", plan.Overview)
 	}
 }
+
+func TestStepModels(t *testing.T) {
+	env := map[string]string{"CLAUDE_MODEL": "opus", "CLAUDE_FSD_MODEL": " sonnet ", "CLAUDE_RUNBOOK_MODEL": "claude-sonnet-5-5"}
+	config, err := LoadClaudeConfig(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("LoadClaudeConfig() error = %v", err)
+	}
+	for step, want := range map[string]string{StepFSD: "sonnet", StepRunbook: "claude-sonnet-5-5", StepRFC: "opus", StepEngineer: "opus"} {
+		if got := config.ModelFor(step); got != want {
+			t.Fatalf("ModelFor(%s) = %q, want %q", step, got, want)
+		}
+	}
+	if got := (ClaudeConfig{}).ModelFor(StepFSD); got != "" {
+		t.Fatalf("ModelFor() without settings = %q, want the CLI default", got)
+	}
+
+	for _, bad := range []string{"--dangerously-skip-permissions", "sonnet; calc", "son net"} {
+		_, err := LoadClaudeConfig(func(key string) string { return map[string]string{"CLAUDE_FSD_MODEL": bad}[key] })
+		if err == nil || !strings.Contains(err.Error(), "CLAUDE_FSD_MODEL") {
+			t.Fatalf("LoadClaudeConfig(CLAUDE_FSD_MODEL=%q) error = %v, want it rejected", bad, err)
+		}
+	}
+
+	// Each document kind runs on its own model; a step without one keeps
+	// the shared model.
+	writer, err := NewClaudeDocumentWriter(ClaudeConfig{Executable: os.Args[0], Model: "opus", StepModels: map[string]string{StepFSD: "sonnet"}}, `C:\Codes`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[workflow.DocumentKind]string{workflow.FSDKind: "sonnet", workflow.RFCKind: "opus", workflow.RunbookKind: "opus"} {
+		args := writer.cli.args(claudeRun{agent: RFCWriterAgent, tools: documentWriterTools, model: writer.models[kind]})
+		if !containsPair(args, []string{"--model", want}) {
+			t.Fatalf("%s writer args = %q, want --model %s", kind, args, want)
+		}
+	}
+	engineer, err := NewClaudeEngineer(ClaudeConfig{Executable: os.Args[0], Model: "opus", StepModels: map[string]string{StepEngineer: "sonnet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := engineer.cli.args(claudeRun{agent: SoftwareEngineerAgent, tools: engineerTools}); !containsPair(args, []string{"--model", "sonnet"}) {
+		t.Fatalf("engineer args = %q, want its own model", args)
+	}
+}

@@ -64,6 +64,8 @@ type ClaudeConfig struct {
 	// AllowedCommands are the shell command prefixes the engineer and
 	// reviewer may run besides the worktree's checks.
 	AllowedCommands []string
+	// StepModels overrides Model for single steps, by Step* name.
+	StepModels map[string]string
 }
 
 // claudeCLI runs one agent of the embedded plugin through the Claude Code
@@ -75,7 +77,8 @@ type claudeCLI struct {
 	model      string
 }
 
-func newClaudeCLI(config ClaudeConfig) (claudeCLI, error) {
+// newClaudeCLI runs agents with the model configured for step.
+func newClaudeCLI(config ClaudeConfig, step string) (claudeCLI, error) {
 	executable := strings.TrimSpace(config.Executable)
 	if executable == "" {
 		executable = DefaultClaudeExecutable
@@ -84,7 +87,7 @@ func newClaudeCLI(config ClaudeConfig) (claudeCLI, error) {
 	if err != nil {
 		return claudeCLI{}, err
 	}
-	return claudeCLI{executable: executable, pluginDir: pluginDir, model: strings.TrimSpace(config.Model)}, nil
+	return claudeCLI{executable: executable, pluginDir: pluginDir, model: config.ModelFor(step)}, nil
 }
 
 // ClaudePRDGenerator writes PRDs with the prd-maker agent.
@@ -94,7 +97,7 @@ type ClaudePRDGenerator struct {
 }
 
 func NewClaudePRDGenerator(config ClaudeConfig) (*ClaudePRDGenerator, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepPRD)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +153,8 @@ type claudeRun struct {
 	jsonSchema string
 	// addDirs are directories the agent may use besides dir.
 	addDirs []string
+	// model, when set, overrides the CLI's model for this run.
+	model string
 }
 
 // run executes one agent with only the given tools, in dir, and returns its
@@ -209,8 +214,8 @@ func (c claudeCLI) runResult(ctx context.Context, spec claudeRun) (claudeResult,
 
 func (c claudeCLI) args(spec claudeRun) []string {
 	args := []string{"-p", "--output-format", "json", "--plugin-dir", c.pluginDir, "--agent", spec.agent, "--tools", spec.tools}
-	if c.model != "" {
-		args = append(args, "--model", c.model)
+	if model := firstNonEmpty(spec.model, c.model); model != "" {
+		args = append(args, "--model", model)
 	}
 	if spec.permissionMode != "" {
 		args = append(args, "--permission-mode", spec.permissionMode)

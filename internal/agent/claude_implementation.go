@@ -84,7 +84,7 @@ type ClaudeEngineer struct {
 }
 
 func NewClaudeEngineer(config ClaudeConfig) (*ClaudeEngineer, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepEngineer)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ type ClaudeReviewer struct {
 }
 
 func NewClaudeReviewer(config ClaudeConfig) (*ClaudeReviewer, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepReviewer)
 	if err != nil {
 		return nil, err
 	}

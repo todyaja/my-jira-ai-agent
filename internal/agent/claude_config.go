@@ -40,6 +40,11 @@ func LoadClaudeConfig(getenv func(string) string) (ClaudeConfig, error) {
 		return ClaudeConfig{}, err
 	}
 
+	stepModels, err := loadStepModels(getenv)
+	if err != nil {
+		return ClaudeConfig{}, err
+	}
+
 	return ClaudeConfig{
 		Executable:            executable,
 		Model:                 strings.TrimSpace(getenv("CLAUDE_MODEL")),
@@ -48,7 +53,61 @@ func LoadClaudeConfig(getenv func(string) string) (ClaudeConfig, error) {
 		ImplementationTimeout: implementationTimeout,
 		ReviewTimeout:         reviewTimeout,
 		AllowedCommands:       allowedCommands,
+		StepModels:            stepModels,
 	}, nil
+}
+
+// Steps whose model CLAUDE_<step>_MODEL can set apart from CLAUDE_MODEL.
+const (
+	StepPRD      = "PRD"
+	StepTRD      = "TRD"
+	StepEngineer = "ENGINEER"
+	StepReviewer = "REVIEWER"
+	StepRFC      = "RFC"
+	StepFSD      = "FSD"
+	StepRunbook  = "RUNBOOK"
+)
+
+var modelSteps = []string{StepPRD, StepTRD, StepEngineer, StepReviewer, StepRFC, StepFSD, StepRunbook}
+
+// ModelFor returns the model a step runs on: its own setting, else Model,
+// else empty for the CLI's default.
+func (c ClaudeConfig) ModelFor(step string) string {
+	if model := c.StepModels[step]; model != "" {
+		return model
+	}
+	return strings.TrimSpace(c.Model)
+}
+
+// loadStepModels reads CLAUDE_<step>_MODEL for every step, so cheaper
+// models can run the steps that need less judgment. It returns nil when none
+// is set.
+func loadStepModels(getenv func(string) string) (map[string]string, error) {
+	var models map[string]string
+	for _, step := range modelSteps {
+		key := "CLAUDE_" + step + "_MODEL"
+		value := strings.TrimSpace(getenv(key))
+		if value == "" {
+			continue
+		}
+		if strings.HasPrefix(value, "-") || strings.ContainsAny(value, shellMetacharacters+" 	") {
+			return nil, fmt.Errorf("%s must be one model alias or name, e.g. sonnet", key)
+		}
+		if models == nil {
+			models = map[string]string{}
+		}
+		models[step] = value
+	}
+	return models, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // loadAllowedCommands reads CLAUDE_ALLOWED_COMMANDS, a comma-separated list

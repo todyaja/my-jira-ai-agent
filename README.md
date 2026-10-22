@@ -117,6 +117,7 @@ All settings are environment variables, read from `.env` when present. See
 | `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_TOKEN` | no | | Open pull requests in PR Ready; an empty token turns this off |
 | `CLAUDE_COMMAND` | no | `claude` | Path to the Claude Code CLI |
 | `CLAUDE_MODEL` | no | CLI default | Model alias or name, e.g. `opus` |
+| `CLAUDE_<STEP>_MODEL` | no | `CLAUDE_MODEL` | Model for one step: `PRD`, `TRD`, `ENGINEER`, `REVIEWER`, `RFC`, `FSD`, `RUNBOOK` (e.g. `CLAUDE_FSD_MODEL=sonnet`) |
 | `CLAUDE_TIMEOUT_SECONDS` | no | `300` | PRD agent time limit |
 | `CLAUDE_PLANNING_TIMEOUT_SECONDS` | no | `900` | Technical planner time limit |
 | `CLAUDE_IMPLEMENTATION_TIMEOUT_SECONDS` | no | `1800` | Software engineer time limit |

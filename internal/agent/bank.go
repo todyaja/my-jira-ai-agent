@@ -107,7 +107,7 @@ type ClaudeRepoPlanner struct {
 }
 
 func NewClaudeRepoPlanner(config ClaudeConfig, root string) (*ClaudeRepoPlanner, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepTRD)
 	if err != nil {
 		return nil, err
 	}
@@ -229,17 +229,20 @@ type ClaudeDocumentWriter struct {
 	dir     string
 	addDirs []string
 	timeout time.Duration
+	// models are the models of the RFC, FSD and runbook writers.
+	models map[workflow.DocumentKind]string
 }
 
 // NewClaudeDocumentWriter runs the writers in dir, where the skills keep
 // their templates and outputs, with read access to addDirs such as the
 // repositories root and the skills folder.
 func NewClaudeDocumentWriter(config ClaudeConfig, dir string, addDirs []string) (*ClaudeDocumentWriter, error) {
-	cli, err := newClaudeCLI(config)
+	cli, err := newClaudeCLI(config, StepRFC)
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeDocumentWriter{cli: cli, dir: dir, addDirs: addDirs, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout)}, nil
+	models := map[workflow.DocumentKind]string{workflow.RFCKind: config.ModelFor(StepRFC), workflow.FSDKind: config.ModelFor(StepFSD), workflow.RunbookKind: config.ModelFor(StepRunbook)}
+	return &ClaudeDocumentWriter{cli: cli, dir: dir, addDirs: addDirs, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout), models: models}, nil
 }
 
 func (w *ClaudeDocumentWriter) WriteDocument(ctx context.Context, input workflow.DocumentInput) (workflow.DocumentResult, error) {
@@ -257,6 +260,7 @@ func (w *ClaudeDocumentWriter) WriteDocument(ctx context.Context, input workflow
 		permissionMode: "acceptEdits",
 		allowedTools:   bashRules(documentWriterCommands),
 		addDirs:        w.addDirs,
+		model:          w.models[input.Kind],
 	})
 	if err != nil {
 		return workflow.DocumentResult{}, err
