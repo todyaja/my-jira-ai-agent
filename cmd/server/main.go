@@ -175,6 +175,7 @@ func buildAgents(getenv func(string) string) (workflowAgents, error) {
 	if err != nil {
 		return workflowAgents{}, err
 	}
+	log.Printf("Claude models: %s", describeModels(config))
 	var agents workflowAgents
 	if agents.prd, err = agent.NewClaudePRDGenerator(config); err != nil {
 		return workflowAgents{}, err
@@ -311,4 +312,20 @@ func loadPollInterval(getenv func(string) string) (time.Duration, error) {
 		return 0, fmt.Errorf("JIRA_POLL_INTERVAL_SECONDS must be a positive integer")
 	}
 	return time.Duration(seconds) * time.Second, nil
+}
+
+// describeModels lists the model of every step, e.g. "default=CLI default,
+// FSD=sonnet", so the log shows which steps were moved to another model.
+func describeModels(config agent.ClaudeConfig) string {
+	model := strings.TrimSpace(config.Model)
+	if model == "" {
+		model = "CLI default"
+	}
+	parts := []string{"default=" + model}
+	for _, step := range []string{agent.StepPRD, agent.StepTRD, agent.StepEngineer, agent.StepReviewer, agent.StepRFC, agent.StepFSD, agent.StepRunbook} {
+		if stepModel, set := config.StepModels[step]; set {
+			parts = append(parts, step+"="+stepModel)
+		}
+	}
+	return strings.Join(parts, ", ")
 }

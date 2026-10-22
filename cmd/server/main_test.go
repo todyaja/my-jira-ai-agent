@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/tody-aja/jira-ai-agent/internal/agent"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,5 +153,15 @@ func TestLoadPortAndWorkflow(t *testing.T) {
 	}
 	if _, err := isBankWorkflow(env(map[string]string{"WORKFLOW": "kanban"})); err == nil {
 		t.Fatal("isBankWorkflow(kanban) succeeded")
+	}
+}
+
+func TestDescribeModels(t *testing.T) {
+	if got := describeModels(agent.ClaudeConfig{}); got != "default=CLI default" {
+		t.Fatalf("describeModels() = %q", got)
+	}
+	config := agent.ClaudeConfig{Model: "opus", StepModels: map[string]string{agent.StepRunbook: "sonnet", agent.StepFSD: "sonnet"}}
+	if got := describeModels(config); got != "default=opus, FSD=sonnet, RUNBOOK=sonnet" {
+		t.Fatalf("describeModels() = %q", got)
 	}
 }
