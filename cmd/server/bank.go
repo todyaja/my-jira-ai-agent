@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/tody-aja/jira-ai-agent/internal/agent"
 	"github.com/tody-aja/jira-ai-agent/internal/confluence"
+	"github.com/tody-aja/jira-ai-agent/internal/devdb"
 	"github.com/tody-aja/jira-ai-agent/internal/git"
 	"github.com/tody-aja/jira-ai-agent/internal/gitlab"
 	"github.com/tody-aja/jira-ai-agent/internal/repos"
@@ -71,6 +73,19 @@ func loadBankDependencies(getenv func(string) string, publisher *confluence.Clie
 		Planner:   planner,
 		Workspace: workspaces(),
 		Publisher: confluencePublisher{publisher},
+		// The ticket code and what changes follow, e.g.
+		// tody/feature/core-312-bulk-overpayment-withdraw.
+		BranchPrefix: strings.TrimSpace(getenv("BRANCH_PREFIX")),
+	}
+	if config.DevDB.EnvFile != "" {
+		runner, err := devdb.NewRunner(config.DevDB.EnvFile, config.DevDB.Address)
+		if err != nil {
+			return workflow.BankDependencies{}, nil, fmt.Errorf("DEV_DB_ENV_FILE: %w", err)
+		}
+		deps.SQL = sqlRunner{runner}
+		log.Printf("Development database %s (%s): the TRD planner and engineer read it through %s; approved SQL plans are applied to it at Ready To Implement", config.DevDB.Address, strings.Join(devdb.Names(runner.Connections), ", "), config.DevDB.Tool)
+	} else {
+		log.Println("Warning: DEV_DB_ENV_FILE is not configured, so SQL migration plans are written without the development database and issues with one stop at Ready To Implement")
 	}
 	if token := strings.TrimSpace(getenv("GITLAB_TOKEN")); token != "" {
 		baseURL := strings.TrimSpace(getenv("GITLAB_URL"))
@@ -80,6 +95,22 @@ func loadBankDependencies(getenv func(string) string, publisher *confluence.Clie
 		deps.MergeRequests = gitlab.RepoOpener{Client: &gitlab.Client{BaseURL: baseURL, Token: token, HTTPClient: &http.Client{Timeout: apiTimeout}}}
 	}
 	return deps, registry, nil
+}
+
+// sqlRunner adapts the development database runner to the workflow.
+type sqlRunner struct {
+	*devdb.Runner
+}
+
+func (r sqlRunner) CheckSQL(database, script string, readOnly bool) error {
+	_, err := r.Check(database, script, readOnly)
+	return err
+}
+
+func (r sqlRunner) RunSQL(ctx context.Context, database, script string, readOnly bool) (string, error) {
+	var output strings.Builder
+	err := r.Run(ctx, database, script, readOnly, &output)
+	return output.String(), err
 }
 
 // skillsDir is where the user's Claude skills, such as make-fsd, live:
@@ -121,4 +152,20 @@ type confluencePublisher struct {
 func (p confluencePublisher) PublishPageUnder(ctx context.Context, parents []string, title, markdown string) (workflow.PublishedPage, error) {
 	page, err := p.Client.PublishPageUnder(ctx, parents, title, markdown)
 	return workflow.PublishedPage{ID: page.ID, URL: page.URL}, err
+}
+
+func (p confluencePublisher) OpenComments(ctx context.Context, pageID string) ([]workflow.PageComment, error) {
+	comments, err := p.Client.OpenComments(ctx, pageID)
+	if err != nil {
+		return nil, err
+	}
+	converted := make([]workflow.PageComment, 0, len(comments))
+	for _, comment := range comments {
+		converted = append(converted, workflow.PageComment(comment))
+	}
+	return converted, nil
+}
+
+func (p confluencePublisher) CloseComment(ctx context.Context, comment workflow.PageComment, reply string) error {
+	return p.Client.CloseComment(ctx, confluence.Comment(comment), reply)
 }

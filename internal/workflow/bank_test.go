@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tody-aja/jira-ai-agent/internal/confluence"
 	"github.com/tody-aja/jira-ai-agent/internal/jira"
 	"github.com/tody-aja/jira-ai-agent/internal/repos"
 )
@@ -34,6 +35,12 @@ type bankFake struct {
 	pageParents map[string][]string
 	attachments map[string]string
 	labels      map[string][]string
+	publishes   int
+	// openComments are the reviewers' comments per page ID; closed records
+	// each closed comment with its reply and how many pages were published
+	// before it was closed.
+	openComments map[string][]PageComment
+	closed       []closedComment
 
 	repoList  []repos.Repo
 	documents []DocumentInput
@@ -50,6 +57,30 @@ type bankFake struct {
 	pushed      []string
 	removed     []string
 	merges      map[string]string
+	// sql, when set, is the development database.
+	sql *fakeSQLRunner
+}
+
+// fakeSQLRunner records the scripts run on the development database and
+// fails the one containing failOn.
+type fakeSQLRunner struct {
+	ran    []string
+	failOn string
+}
+
+func (r *fakeSQLRunner) CheckSQL(database, script string, readOnly bool) error {
+	if database != "cbsdb" && database != "ctdb" {
+		return fmt.Errorf("no database %s", database)
+	}
+	return nil
+}
+
+func (r *fakeSQLRunner) RunSQL(_ context.Context, database, script string, readOnly bool) (string, error) {
+	r.ran = append(r.ran, fmt.Sprintf("%s readOnly=%t: %s", database, readOnly, script))
+	if r.failOn != "" && strings.Contains(script, r.failOn) {
+		return "partial output", fmt.Errorf("Error 1062: duplicate entry")
+	}
+	return "-- 1 row(s)", nil
 }
 
 func newBankFake(t *testing.T, ticked ...string) *bankFake {
@@ -69,14 +100,15 @@ func newBankFake(t *testing.T, ticked ...string) *bankFake {
 	}
 	description := `{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"Bulk withdrawal."}]},{"type":"taskList","attrs":{"localId":"l"},"content":[` + strings.Join(items, ",") + `]}]}`
 	return &bankFake{
-		t:           t,
-		issue:       jira.Issue{Key: "NBS-12", Summary: "Bulk withdrawal", Description: "Bulk withdrawal.", DescriptionADF: json.RawMessage(description)},
-		properties:  map[string]json.RawMessage{},
-		pages:       map[string]PublishedPage{},
-		pageBodies:  map[string]string{},
-		pageParents: map[string][]string{},
-		attachments: map[string]string{},
-		labels:      map[string][]string{},
+		t:            t,
+		issue:        jira.Issue{Key: "NBS-12", Summary: "Bulk withdrawal", Description: "Bulk withdrawal.", DescriptionADF: json.RawMessage(description)},
+		properties:   map[string]json.RawMessage{},
+		pages:        map[string]PublishedPage{},
+		pageBodies:   map[string]string{},
+		pageParents:  map[string][]string{},
+		attachments:  map[string]string{},
+		labels:       map[string][]string{},
+		openComments: map[string][]PageComment{},
 		repoList: []repos.Repo{
 			{Name: "bnc_busi", Path: "/codes/bnc_busi", BaseBranch: "master"},
 			{Name: "bnc_iobus", Path: "/codes/bnc_iobus", BaseBranch: "master"},
@@ -118,7 +150,13 @@ func (f *bankFake) run(t *testing.T) error {
 	if !ok {
 		t.Fatalf("status %q is not a bank status", f.status)
 	}
-	return step.Run(context.Background(), f.issue.Key, f.deps())
+	deps := f.deps()
+	// Only a set runner is passed: a nil *fakeSQLRunner in the interface
+	// would not read as nil.
+	if f.sql != nil {
+		deps.Bank.SQL = f.sql
+	}
+	return step.Run(context.Background(), f.issue.Key, deps)
 }
 
 // IssueReader and IssueWriter.
@@ -207,7 +245,26 @@ func (f *bankFake) PublishPageUnder(_ context.Context, parents []string, title, 
 		f.pageParents[title] = parents
 	}
 	f.pageBodies[title] = markdown
+	f.publishes++
 	return page, nil
+}
+func (f *bankFake) OpenComments(_ context.Context, pageID string) ([]PageComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PageComment(nil), f.openComments[pageID]...), nil
+}
+func (f *bankFake) CloseComment(_ context.Context, comment PageComment, reply string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	open := []PageComment{}
+	for _, candidate := range f.openComments[comment.PageID] {
+		if candidate.ID != comment.ID {
+			open = append(open, candidate)
+		}
+	}
+	f.openComments[comment.PageID] = open
+	f.closed = append(f.closed, closedComment{id: comment.ID, reply: reply, publishes: f.publishes})
+	return nil
 }
 func (f *bankFake) PageContent(_ context.Context, title string) (string, bool, error) {
 	f.mu.Lock()
@@ -274,12 +331,17 @@ func (f *bankFake) OpenMergeRequest(_ context.Context, repo repos.Repo, source, 
 	if url, found := f.merges[repo.Name]; found {
 		return url, nil
 	}
-	if !strings.Contains(title, "["+repo.Name+"]") || target != repo.BaseBranch || source != "feature/NBS-12" || !strings.Contains(body, "Merge order") {
+	if !strings.Contains(title, "["+repo.Name+"]") || target != repo.BaseBranch || source != "feature/nbs-12-bulk-withdraw-batch" || !strings.Contains(body, "Merge order") {
 		f.t.Errorf("merge request for %s = (%q, %q, %q, %q)", repo.Name, source, target, title, body)
 	}
 	url := "http://gitlab/" + repo.Name + "/-/merge_requests/1"
 	f.merges[repo.Name] = url
 	return url, nil
+}
+
+type closedComment struct {
+	id, reply string
+	publishes int
 }
 
 type fakeRepoWorkspace struct {
@@ -347,6 +409,7 @@ func TestBankWorkflowWalksAnIssueThroughEveryStep(t *testing.T) {
 	f.plan = PlanResult{
 		Overview:   "# Overview",
 		MergeOrder: []string{"bnc_busi", "sump-vue"},
+		BranchName: "Bulk withdraw batch",
 		Repos: []RepoTRD{
 			{Repo: "SUMP-VUE", Title: "Halaman upload", TRD: "# sump-vue TRD"},
 			{Repo: "bnc_busi", Title: "Batch bulk withdrawal", TRD: "# busi TRD"},
@@ -480,24 +543,66 @@ func TestBankDocumentRevisionKeepsTitleAndMarksFeedback(t *testing.T) {
 	f := newBankFake(t, "bnc_busi")
 	f.status = "Request RFC"
 	expectStatus(t, f, f.run(t), BankRFCReview)
-	f.comments = append(f.comments, jira.Comment{ID: "fb", Body: "!rfc-writer tambahkan alur lama", Properties: map[string]json.RawMessage{}})
+	rfcTitle := "RFC-2026-11 Bulk Withdrawal [NBS-12]"
+	pageID := f.pages[rfcTitle].ID
+	// Jira comments are not feedback for bank documents.
+	f.comments = append(f.comments, jira.Comment{ID: "jira", Body: "!rfc-writer ignored", Properties: map[string]json.RawMessage{}})
+	f.openComments[pageID] = []PageComment{
+		{ID: "inline", PageID: pageID, Inline: true, Text: "tambahkan alur lama", Selection: "Alur baru"},
+		{ID: "footer", PageID: pageID, Text: "nomor RFC salah"},
+	}
 	f.status = "Request RFC"
 	expectStatus(t, f, f.run(t), BankRFCReview)
 
 	revision := f.documents[1]
-	if revision.CurrentTitle != "RFC-2026-11 Bulk Withdrawal [NBS-12]" || revision.CurrentDocx != f.docx || revision.CurrentContent != "# rfc\nround 1" {
+	if revision.CurrentTitle != rfcTitle || revision.CurrentDocx != f.docx || revision.CurrentContent != "# rfc\nround 1" {
 		t.Fatalf("revision input = %+v, want the current document", revision)
 	}
-	if len(revision.Feedback) != 1 || revision.Feedback[0].Text != "tambahkan alur lama" {
-		t.Fatalf("feedback = %+v", revision.Feedback)
+	if len(revision.Feedback) != 2 || revision.Feedback[0].Text != "tambahkan alur lama" || revision.Feedback[0].Selection != "Alur baru" || revision.Feedback[0].Page != rfcTitle || revision.Feedback[1].Text != "nomor RFC salah" {
+		t.Fatalf("feedback = %+v, want both page comments", revision.Feedback)
 	}
-	for _, comment := range f.comments {
-		if _, done := comment.Properties[RFCFeedbackDoneProperty]; comment.ID == "fb" && !done {
-			t.Fatal("the feedback comment was not marked done")
-		}
+	// Comments are closed before the page is republished, which would
+	// unanchor inline comments.
+	if len(f.closed) != 2 || f.closed[0].publishes != 1 || f.closed[1].publishes != 1 || !strings.Contains(f.closed[0].reply, "RFC") {
+		t.Fatalf("closed = %+v, want both comments closed before republishing", f.closed)
+	}
+
+	// With every comment closed, sending it back leaves the RFC alone.
+	f.status = "Request RFC"
+	expectStatus(t, f, f.run(t), BankRFCReview)
+	if len(f.documents) != 2 || !strings.Contains(f.lastComment(), "no open comments") {
+		t.Fatalf("documents written = %d, last comment %q; want no rewrite", len(f.documents), f.lastComment())
 	}
 	if len(f.pages) != 1 || f.pageBodies["RFC-2026-11 Bulk Withdrawal [NBS-12]"] != "# rfc\nround 2" {
 		t.Fatalf("pages = %v, want the one RFC page updated in place", f.pageBodies)
+	}
+}
+
+func TestBankTRDRevisionReadsCommentsOnEveryTRDPage(t *testing.T) {
+	f := newBankFake(t, "bnc_busi", "sump-vue")
+	f.plan = PlanResult{Overview: "# Overview", Repos: []RepoTRD{{Repo: "bnc_busi", Title: "Batch", TRD: "# busi"}, {Repo: "sump-vue", Title: "Upload", TRD: "# vue"}}}
+	for _, status := range []string{"Request RFC", "Request TRD"} {
+		f.status = status
+		if err := f.run(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overview, repo := f.pages["NBS-12 TRD - Bulk withdrawal"].ID, f.pages["NBS-12 [sump-vue] Upload"].ID
+	f.openComments[overview] = []PageComment{{ID: "o1", PageID: overview, Text: "urutan deploy dibalik"}}
+	f.openComments[repo] = []PageComment{{ID: "r1", PageID: repo, Inline: true, Text: "pakai komponen tabel", Selection: "Halaman upload"}}
+
+	f.status = "Request TRD"
+	expectStatus(t, f, f.run(t), BankTRDReview)
+	feedback := f.plans[1].Feedback
+	if len(feedback) != 2 || feedback[0].Page != "NBS-12 TRD - Bulk withdrawal" || feedback[1].Page != "NBS-12 [sump-vue] Upload" || feedback[1].Selection != "Halaman upload" {
+		t.Fatalf("feedback = %+v, want the overview and sump-vue comments with their pages", feedback)
+	}
+	if len(f.closed) != 2 || f.closed[0].publishes != f.closed[1].publishes || !strings.Contains(f.closed[0].reply, "TRD") {
+		t.Fatalf("closed = %+v, want both comments closed before republishing", f.closed)
+	}
+	formatted := FormatFeedback(feedback)
+	if !strings.Contains(formatted, `on page "NBS-12 [sump-vue] Upload"`) || !strings.Contains(formatted, `On the highlighted text "Halaman upload":`) {
+		t.Fatalf("formatted feedback = %q", formatted)
 	}
 }
 
@@ -549,6 +654,160 @@ func TestBankImplementingKeepsOtherRepositoriesWhenOneFails(t *testing.T) {
 	}
 	if body := f.lastComment(); !strings.Contains(body, "sump-vue - round 1 failed") || !strings.Contains(body, "bnc_busi - round 1") {
 		t.Fatalf("comment = %q", body)
+	}
+}
+
+const testSQLPlan = "Adds the dpb_x table, then registers its service.\n\n" +
+	"## cbsdb\n\n### Pre-check\n\n```sql\nSELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'dpb_x';\n```\n\n" +
+	"### DDL\n\nFollows dpb_acct.\n\n```sql\nCREATE TABLE IF NOT EXISTS dpb_x (a int)\n```\n\n" +
+	"### Verify\n\n```sql\nSELECT COUNT(*) FROM dpb_x;\n```\n\n" +
+	"### Rollback\n\n```sql\nDROP TABLE dpb_x;\n```\n\n" +
+	"## ctdb\n\n### DML\n\n```sql\nINSERT INTO smp_sys_trans SELECT 'x' FROM dual WHERE NOT EXISTS (SELECT 1 FROM smp_sys_trans WHERE a = 'x' AND b > 1);\n```\n"
+
+func TestRequestTRDPublishesTheSQLPlanForReview(t *testing.T) {
+	f := newBankFake(t, "bnc_busi")
+	f.status = "Request RFC"
+	expectStatus(t, f, f.run(t), BankRFCReview)
+	f.plan = PlanResult{Overview: "# Overview", Repos: []RepoTRD{{Repo: "bnc_busi", TRD: "# busi"}}, SQL: testSQLPlan}
+	f.status = "Request TRD"
+	expectStatus(t, f, f.run(t), BankTRDReview)
+
+	title := "NBS-12 SQL Migration Plan - Bulk withdrawal"
+	if body := f.pageBodies[title]; body != testSQLPlan {
+		t.Fatalf("SQL plan page = %q", body)
+	}
+	if parents := f.pageParents[title]; strings.Join(parents, "/") != "SQLs/SQLs 2026" {
+		t.Fatalf("parents = %v", parents)
+	}
+	if labels := f.labels[f.pages[title].ID]; len(labels) != 1 || labels[0] != "NBS-12" {
+		t.Fatalf("labels = %v", labels)
+	}
+	if text := f.descriptionText(t); !strings.Contains(text, "SQL MIGRATION PLAN") || !strings.Contains(text, "TRD") {
+		t.Fatalf("description = %q, want the SQL plan and TRDs linked", text)
+	}
+
+	// A comment on the SQL page is TRD feedback; the planner sees the plan.
+	f.openComments[f.pages[title].ID] = []PageComment{{ID: "s1", PageID: f.pages[title].ID, Text: "pakai shardkey acct_no"}}
+	f.status = "Request TRD"
+	expectStatus(t, f, f.run(t), BankTRDReview)
+	revision := f.plans[len(f.plans)-1]
+	if len(revision.Feedback) != 1 || revision.Feedback[0].Page != title || revision.CurrentSQL != testSQLPlan {
+		t.Fatalf("revision feedback = %+v current SQL = %q", revision.Feedback, revision.CurrentSQL)
+	}
+}
+
+func TestRequestTRDWithoutDatabaseChangesPublishesNoSQLPlan(t *testing.T) {
+	f := newBankFake(t, "bnc_busi")
+	f.status = "Request RFC"
+	expectStatus(t, f, f.run(t), BankRFCReview)
+	f.plan = PlanResult{Overview: "# Overview", Repos: []RepoTRD{{Repo: "bnc_busi", TRD: "# busi"}}, SQL: "None."}
+	f.status = "Request TRD"
+	expectStatus(t, f, f.run(t), BankTRDReview)
+	for title := range f.pages {
+		if strings.Contains(title, "SQL") {
+			t.Fatalf("published %q for a change without database changes", title)
+		}
+	}
+}
+
+// approvedSQLIssue walks an issue to TRD Review with testSQLPlan, then puts
+// the page in storage format, as Confluence returns it.
+func approvedSQLIssue(t *testing.T) *bankFake {
+	t.Helper()
+	f := newBankFake(t, "bnc_busi")
+	f.plan = PlanResult{Overview: "# Overview", Repos: []RepoTRD{{Repo: "bnc_busi", TRD: "# busi"}}, SQL: testSQLPlan}
+	for _, status := range []string{"Request RFC", "Request TRD"} {
+		f.status = status
+		if err := f.run(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.pageBodies["NBS-12 SQL Migration Plan - Bulk withdrawal"] = confluence.MarkdownToStorage(testSQLPlan)
+	return f
+}
+
+func TestReadyToImplementAppliesTheApprovedSQLPlanOnce(t *testing.T) {
+	f := approvedSQLIssue(t)
+	f.sql = &fakeSQLRunner{}
+	f.status = "Ready To Implement"
+	expectStatus(t, f, f.run(t), BankImplementing)
+
+	want := []string{
+		"cbsdb readOnly=true: SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'dpb_x';",
+		"cbsdb readOnly=false: CREATE TABLE IF NOT EXISTS dpb_x (a int);",
+		"cbsdb readOnly=true: SELECT COUNT(*) FROM dpb_x;",
+		"ctdb readOnly=false: INSERT INTO smp_sys_trans SELECT 'x' FROM dual WHERE NOT EXISTS (SELECT 1 FROM smp_sys_trans WHERE a = 'x' AND b > 1);",
+	}
+	if strings.Join(f.sql.ran, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("ran:\n%s\nwant:\n%s", strings.Join(f.sql.ran, "\n"), strings.Join(want, "\n"))
+	}
+	applied := ""
+	for _, comment := range f.comments {
+		if strings.Contains(comment.Body, "SQL migration plan on the development database") {
+			applied = comment.Body
+		}
+	}
+	if !strings.Contains(applied, "cbsdb - ddl") || !strings.Contains(applied, "rollback was not run") {
+		t.Fatalf("SQL comment = %q", applied)
+	}
+
+	// The engineer gets the approved plan and read access.
+	f.implementFn = func(input ImplementInput) (string, error) {
+		if !input.ReadDatabase || !strings.Contains(input.Context, "already applied on the development database") || !strings.Contains(input.Context, "dpb_x") {
+			return "", fmt.Errorf("engineer input = %+v", input)
+		}
+		return "done", nil
+	}
+	expectStatus(t, f, f.run(t), BankAIReview)
+
+	// Starting again with the same approved plan does not run it twice.
+	f.status = "Ready To Implement"
+	expectStatus(t, f, f.run(t), BankImplementing)
+	if len(f.sql.ran) != len(want) {
+		t.Fatalf("ran %d scripts, want the unchanged plan skipped", len(f.sql.ran))
+	}
+}
+
+func TestReadyToImplementStopsWhenTheSQLPlanFails(t *testing.T) {
+	f := approvedSQLIssue(t)
+	f.sql = &fakeSQLRunner{failOn: "INSERT INTO smp_sys_trans"}
+	f.status = "Ready To Implement"
+	err := f.run(t)
+	if err == nil || !strings.Contains(err.Error(), "ctdb dml failed") || f.status != string(BankReadyToImplement) {
+		t.Fatalf("err = %v, status %q; want the failure and no move", err, f.status)
+	}
+	if body := f.lastComment(); !strings.Contains(body, "Failed:") || !strings.Contains(body, "duplicate entry") {
+		t.Fatalf("comment = %q, want the failure posted", body)
+	}
+
+	// Without a development database the approved plan cannot run.
+	f = approvedSQLIssue(t)
+	f.status = "Ready To Implement"
+	if err := f.run(t); err == nil || !strings.Contains(err.Error(), "DEV_DB_ENV_FILE") {
+		t.Fatalf("err = %v, want the missing database reported", err)
+	}
+
+	// A database the server does not have is refused before anything runs.
+	f = approvedSQLIssue(t)
+	f.sql = &fakeSQLRunner{}
+	f.pageBodies["NBS-12 SQL Migration Plan - Bulk withdrawal"] = confluence.MarkdownToStorage(testSQLPlan + "\n## marketingdb\n\n### DML\n\n```sql\nINSERT INTO m VALUES (1);\n```\n")
+	f.status = "Ready To Implement"
+	if err := f.run(t); err == nil || !strings.Contains(err.Error(), "no database marketingdb") || len(f.sql.ran) != 0 {
+		t.Fatalf("err = %v ran = %v; want nothing run", err, f.sql.ran)
+	}
+}
+
+func TestParseSQLPlanReadsReviewerEditsAndSplitCDATA(t *testing.T) {
+	storage := `<p>intro</p><h2><code>cbsdb</code></h2><h3>Pre-check</h3><ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">sql</ac:parameter><ac:plain-text-body><![CDATA[SELECT ']]]]><![CDATA[>' FROM t]]></ac:plain-text-body></ac:structured-macro>` +
+		`<h3>Notes</h3><ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[not run]]></ac:plain-text-body></ac:structured-macro>` +
+		`<h3>DML</h3><ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[UPDATE t SET a = 1 WHERE b = 2]]></ac:plain-text-body></ac:structured-macro>` +
+		`<h2>Summary</h2><p>No code.</p>`
+	plans := parseSQLPlan(storage)
+	if len(plans) != 1 || plans[0].Database != "cbsdb" {
+		t.Fatalf("plans = %+v", plans)
+	}
+	if plans[0].Parts[sqlPreCheck] != "SELECT ']]>' FROM t;" || plans[0].forward() != "UPDATE t SET a = 1 WHERE b = 2;" {
+		t.Fatalf("parts = %+v", plans[0].Parts)
 	}
 }
 
@@ -645,5 +904,26 @@ func TestBankDocumentsReadTheBaseBranch(t *testing.T) {
 	// Context repositories stay at their main checkout.
 	if all := f.documents[0].AllRepos; all[0].Path != "/codes/bnc_busi" {
 		t.Fatalf("AllRepos[0] = %+v, want the main checkout", all[0])
+	}
+}
+
+func TestBankBranchNamesTheTicketAndWhatChanges(t *testing.T) {
+	planned := documentsState{TRD: &trdRecord{BranchName: "Bulk overpayment withdraw batch"}}
+	tests := []struct {
+		name      string
+		issue     jira.Issue
+		documents documentsState
+		prefix    string
+		want      string
+	}{
+		{"ticket line and planner name", jira.Issue{Key: "NBS-9", Summary: "Batch", Description: "Bulk withdraw.\nTicket: CORE-312\nRefs feature_core_201."}, planned, "tody/feature", "tody/feature/core-312-bulk-overpayment-withdraw-batch"},
+		{"labelled ticket only", jira.Issue{Key: "NBS-9", Description: "See core-201 for the upload.\n  ticket :core-77"}, planned, "tody/feature/", "tody/feature/core-77-bulk-overpayment-withdraw-batch"},
+		{"no ticket line falls back to the key", jira.Issue{Key: "NBS-9", Description: "Like CORE-201."}, planned, "tody/feature", "tody/feature/nbs-9-bulk-overpayment-withdraw-batch"},
+		{"no planner name uses the summary", jira.Issue{Key: "NBS-9", Summary: "Batch Overpayment Withdrawat (BE Only, Job/Batch Backend Only, No FE Needed)"}, documentsState{}, "", "feature/nbs-9-batch-overpayment-withdrawat-be-only-job-batch"},
+	}
+	for _, test := range tests {
+		if got := bankBranch(test.issue, test.documents, test.prefix); got != test.want {
+			t.Errorf("%s: bankBranch() = %q, want %q", test.name, got, test.want)
+		}
 	}
 }

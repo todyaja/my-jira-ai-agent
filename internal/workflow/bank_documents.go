@@ -82,11 +82,18 @@ type trdRecord struct {
 	Overview   documentRecord  `json:"overview"`
 	Repos      []repoTRDRecord `json:"repos"`
 	MergeOrder []string        `json:"mergeOrder"`
+	// BranchName is the planner's name for what changes, used in the
+	// implementation branch.
+	BranchName string `json:"branchName,omitempty"`
 }
 
 type documentsState struct {
 	RFC     *documentRecord `json:"rfc,omitempty"`
 	TRD     *trdRecord      `json:"trd,omitempty"`
+	SQL     *documentRecord `json:"sql,omitempty"`
+	// SQLApplied identifies the SQL plan last applied on the development
+	// database.
+	SQLApplied string `json:"sqlApplied,omitempty"`
 	FSD     *documentRecord `json:"fsd,omitempty"`
 	Runbook *documentRecord `json:"runbook,omitempty"`
 }
@@ -107,24 +114,19 @@ type documentKind struct {
 	name    string
 	folder  string
 	heading string
-	channel feedbackChannel
+	review  pageReview
 	// sources lists the approved documents the writer needs.
 	sources func(ctx context.Context, key string, deps Dependencies, state documentsState) ([]SourceDocument, error)
 }
 
 var (
-	rfcFeedback     = feedbackChannel{prefix: RFCFeedbackPrefix, doneProperty: RFCFeedbackDoneProperty, document: "RFC", requestLabel: string(BankRequestRFC), reviewStatus: BankRFCReview}
-	bankTRDFeedback = feedbackChannel{prefix: TRDFeedbackPrefix, doneProperty: TRDFeedbackDoneProperty, document: "TRD", requestLabel: string(BankRequestTRD), reviewStatus: BankTRDReview}
-	fsdFeedback     = feedbackChannel{prefix: FSDFeedbackPrefix, doneProperty: FSDFeedbackDoneProperty, document: "FSD", requestLabel: string(BankFSDRequest), reviewStatus: BankFSDReview}
-	runbookFeedback = feedbackChannel{prefix: RunbookFeedbackPrefix, doneProperty: RunbookFeedbackDoneProperty, document: "runbook", requestLabel: string(BankRunbookRequest), reviewStatus: BankRunbookReview}
-
-	rfcDocument = documentKind{kind: RFCKind, name: "RFC", folder: "RFCs", heading: jira.RFCHeading, channel: rfcFeedback,
+	rfcDocument = documentKind{kind: RFCKind, name: "RFC", folder: "RFCs", heading: jira.RFCHeading, review: rfcReview,
 		sources: func(context.Context, string, Dependencies, documentsState) ([]SourceDocument, error) { return nil, nil }}
-	fsdDocument = documentKind{kind: FSDKind, name: "FSD", folder: "FSDs", heading: jira.FSDHeading, channel: fsdFeedback,
+	fsdDocument = documentKind{kind: FSDKind, name: "FSD", folder: "FSDs", heading: jira.FSDHeading, review: fsdReview,
 		sources: func(ctx context.Context, key string, deps Dependencies, state documentsState) ([]SourceDocument, error) {
 			return collectSources(ctx, key, deps, state, true, false)
 		}}
-	runbookDocument = documentKind{kind: RunbookKind, name: "Runbook", folder: "Runbooks", heading: jira.RunbookHeading, channel: runbookFeedback,
+	runbookDocument = documentKind{kind: RunbookKind, name: "Runbook", folder: "Runbooks", heading: jira.RunbookHeading, review: runbookReview,
 		sources: func(ctx context.Context, key string, deps Dependencies, state documentsState) ([]SourceDocument, error) {
 			return collectSources(ctx, key, deps, state, true, true)
 		}}
@@ -132,8 +134,8 @@ var (
 
 // executeDocument writes the issue's RFC, FSD or runbook, files it in
 // Confluence with the Word file attached, links it from the issue and moves
-// the issue to the document's review. Like the PRD and TRD, an existing
-// document is only revised for feedback comments not handled yet.
+// the issue to the document's review. An existing document is only revised
+// for the open comments on its Confluence page.
 func executeDocument(ctx context.Context, key string, kind documentKind, deps Dependencies) error {
 	logger := deps.Logger
 	fail := func(operation string, err error) error {
@@ -155,14 +157,15 @@ func executeDocument(ctx context.Context, key string, kind documentKind, deps De
 	if err != nil {
 		return fail("load documents", err)
 	}
-	comments, err := deps.Reader.GetComments(ctx, key)
-	if err != nil {
-		return fail("get comments", err)
-	}
-	feedback := kind.channel.outstanding(comments)
 	current := *state.record(kind.kind)
-	if current != nil && len(feedback) == 0 {
-		return kind.channel.skipRevision(ctx, key, deps.Writer, logger)
+	feedback := []Feedback{}
+	if current != nil {
+		if feedback, err = pageFeedback(ctx, deps.Bank.Publisher, []documentRecord{*current}); err != nil {
+			return fail("get comments", err)
+		}
+		if len(feedback) == 0 {
+			return kind.review.skipRevision(ctx, key, deps.Writer, logger)
+		}
 	}
 	sources, err := kind.sources(ctx, key, deps, state)
 	if err != nil {
@@ -214,6 +217,9 @@ func executeDocument(ctx context.Context, key string, kind documentKind, deps De
 		record.Title, record.Parents = current.Title, current.Parents
 	}
 	record.Docx = result.Docx
+	if err := kind.review.closeAll(ctx, key, deps.Bank.Publisher, feedback, logger); err != nil {
+		return err
+	}
 	page, err := publishLabelled(ctx, deps.Bank.Publisher, record.Parents, record.Title, result.Summary, key)
 	if err != nil {
 		return fail("publish "+kind.name, err)
@@ -237,10 +243,7 @@ func executeDocument(ctx context.Context, key string, kind documentKind, deps De
 	if err := deps.Writer.UpdateDescription(ctx, key, description); err != nil {
 		return fail("update description", err)
 	}
-	if err := kind.channel.markAllDone(ctx, key, deps.Writer, feedback, record.URL, logger); err != nil {
-		return err
-	}
-	if err := deps.Writer.TransitionTo(ctx, key, string(kind.channel.reviewStatus)); err != nil {
+	if err := deps.Writer.TransitionTo(ctx, key, string(kind.review.reviewStatus)); err != nil {
 		return fail("transition", err)
 	}
 	return nil
@@ -270,8 +273,8 @@ func publishLabelled(ctx context.Context, publisher DocumentPublisher, parents [
 	return page, nil
 }
 
-// collectSources reads the approved RFC and TRDs, plus the FSD for a
-// runbook, and describes the implementation, for the FSD and runbook
+// collectSources reads the approved RFC and TRDs, the SQL migration plan,
+// plus the FSD for a runbook, and describes the implementation, for the FSD and runbook
 // writers.
 func collectSources(ctx context.Context, key string, deps Dependencies, state documentsState, needTRD, needFSD bool) ([]SourceDocument, error) {
 	required := []*documentRecord{state.RFC}
@@ -305,6 +308,13 @@ func collectSources(ctx context.Context, key string, deps Dependencies, state do
 			}
 			sources = append(sources, SourceDocument{Title: title, Content: content})
 		}
+	}
+	if state.SQL != nil {
+		content, err := pageContent(ctx, deps.Bank.Publisher, state.SQL.Title)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, SourceDocument{Title: state.SQL.Title, Content: content})
 	}
 	implementation, err := loadBankImplementation(ctx, deps.Reader, key)
 	if err != nil {

@@ -22,11 +22,18 @@ const (
 	TRDFeedbackDoneProperty = "jira-ai-agent.tech-planner"
 )
 
-// Feedback is a comment addressed to an agent.
+// Feedback is a comment addressed to an agent: a Jira comment with the
+// agent's prefix, or a comment on a published Confluence page.
 type Feedback struct {
 	Comment jira.Comment
 	// Text is the comment without its prefix.
 	Text string
+	// Page and Selection are set for a Confluence comment: the title of the
+	// page it is on and the text an inline comment highlights.
+	Page      string
+	Selection string
+
+	pageComment *PageComment
 }
 
 type feedbackDoneValue struct {
@@ -144,7 +151,21 @@ func (c feedbackChannel) skipRevision(ctx context.Context, key string, writer Is
 func FormatFeedback(feedback []Feedback) string {
 	var output strings.Builder
 	for index, item := range feedback {
-		fmt.Fprintf(&output, "\n[Comment %d by %s at %s]\n%s\n", index+1, item.Comment.Author, item.Comment.Created, item.Text)
+		fmt.Fprintf(&output, "\n[Comment %d", index+1)
+		if item.Comment.Author != "" {
+			fmt.Fprintf(&output, " by %s", item.Comment.Author)
+		}
+		if item.Comment.Created != "" {
+			fmt.Fprintf(&output, " at %s", item.Comment.Created)
+		}
+		if item.Page != "" {
+			fmt.Fprintf(&output, " on page %q", item.Page)
+		}
+		output.WriteString("]\n")
+		if item.Selection != "" {
+			fmt.Fprintf(&output, "On the highlighted text %q:\n", item.Selection)
+		}
+		output.WriteString(item.Text + "\n")
 	}
 	return output.String()
 }

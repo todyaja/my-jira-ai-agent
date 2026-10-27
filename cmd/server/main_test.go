@@ -157,8 +157,11 @@ func TestLoadPortAndWorkflow(t *testing.T) {
 }
 
 func TestDescribeModels(t *testing.T) {
-	if got := describeModels(agent.ClaudeConfig{}); got != "default=CLI default" {
-		t.Fatalf("describeModels() = %q", got)
+	if got := describeModels(agent.ClaudeConfig{}); got != "default="+agent.DefaultDeepSeekModel {
+		t.Fatalf("describeModels() = %q, want the DeepSeek default", got)
+	}
+	if got := describeModels(agent.ClaudeConfig{Provider: agent.ProviderAnthropic}); got != "default=CLI default" {
+		t.Fatalf("describeModels(anthropic) = %q, want the CLI default", got)
 	}
 	config := agent.ClaudeConfig{Model: "opus", StepModels: map[string]string{agent.StepRunbook: "sonnet", agent.StepFSD: "sonnet"}}
 	if got := describeModels(config); got != "default=opus, FSD=sonnet, RUNBOOK=sonnet" {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -66,15 +68,34 @@ type ClaudeConfig struct {
 	AllowedCommands []string
 	// StepModels overrides Model for single steps, by Step* name.
 	StepModels map[string]string
+	// DevDB, when set, lets the bank planner read and the engineer change
+	// the development database.
+	DevDB DevDB
+	// Provider is the AI provider every run uses: ProviderDeepSeek (the
+	// default) or ProviderAnthropic, which is opt-in.
+	Provider string
+	// providerEnv is added to every Claude Code process. In DeepSeek mode it
+	// carries the endpoint, model aliases and API token; it is never logged.
+	providerEnv []string
+}
+
+// ProviderName returns the configured provider, defaulting to DeepSeek.
+func (c ClaudeConfig) ProviderName() string {
+	if c.Provider == "" {
+		return ProviderDeepSeek
+	}
+	return c.Provider
 }
 
 // claudeCLI runs one agent of the embedded plugin through the Claude Code
-// CLI in print mode, so it uses the plan the CLI is logged in with rather
-// than an API key.
+// CLI in print mode, with the provider environment the workflow configured.
 type claudeCLI struct {
 	executable string
 	pluginDir  string
 	model      string
+	// environment is the provider configuration every run gets, including
+	// the API token, so it is never written to a log or the command line.
+	environment []string
 }
 
 // newClaudeCLI runs agents with the model configured for step.
@@ -83,11 +104,15 @@ func newClaudeCLI(config ClaudeConfig, step string) (claudeCLI, error) {
 	if executable == "" {
 		executable = DefaultClaudeExecutable
 	}
+	provider := config.ProviderName()
+	if provider == ProviderDeepSeek && len(config.providerEnv) == 0 {
+		return claudeCLI{}, fmt.Errorf("CLAUDE_PROVIDER=deepseek needs DEEPSEEK_API_KEY; load the configuration with LoadClaudeConfig")
+	}
 	pluginDir, err := installPlugin(pluginRoot())
 	if err != nil {
 		return claudeCLI{}, err
 	}
-	return claudeCLI{executable: executable, pluginDir: pluginDir, model: config.ModelFor(step)}, nil
+	return claudeCLI{executable: executable, pluginDir: pluginDir, model: config.ModelFor(step), environment: config.providerEnv}, nil
 }
 
 // ClaudePRDGenerator writes PRDs with the prd-maker agent.
@@ -155,6 +180,8 @@ type claudeRun struct {
 	addDirs []string
 	// model, when set, overrides the CLI's model for this run.
 	model string
+	// env are extra NAME=value entries for the agent's environment.
+	env []string
 }
 
 // run executes one agent with only the given tools, in dir, and returns its
@@ -171,16 +198,73 @@ func (c claudeCLI) run(ctx context.Context, spec claudeRun) (string, error) {
 	return output, nil
 }
 
-// runResult executes one agent and returns its decoded result.
+// maxClaudeAttempts bounds one agent's attempts. Only failures that may clear
+// up on their own are retried; a timeout or a deterministic failure is
+// reported at once so the workflow parks the issue in AI ERROR.
+const maxClaudeAttempts = 2
+
+// claudeRetryDelay is the pause before a retry; tests set it to zero.
+var claudeRetryDelay = 2 * time.Second
+
+// claudeFailure is a failed agent run. transient marks failures, such as a
+// rate limit or a dropped connection, that may succeed when retried.
+type claudeFailure struct {
+	message   string
+	transient bool
+}
+
+func (f claudeFailure) Error() string { return f.message }
+
+// runResult executes one agent, retrying a transient failure once, and
+// returns its decoded result.
 func (c claudeCLI) runResult(ctx context.Context, spec claudeRun) (claudeResult, error) {
+	var lastErr error
+	attempts := 0
+	for attempts < maxClaudeAttempts {
+		attempts++
+		result, err := c.runOnce(ctx, spec)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempts == maxClaudeAttempts || !isTransientClaudeFailure(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return claudeResult{}, lastErr
+		case <-time.After(claudeRetryDelay):
+		}
+	}
+	if attempts > 1 {
+		return claudeResult{}, fmt.Errorf("%w (after %d attempts)", lastErr, attempts)
+	}
+	return claudeResult{}, lastErr
+}
+
+func isTransientClaudeFailure(err error) bool {
+	var failure claudeFailure
+	return errors.As(err, &failure) && failure.transient
+}
+
+func (c claudeCLI) runOnce(ctx context.Context, spec claudeRun) (claudeResult, error) {
 	commandContext, cancel := context.WithTimeout(ctx, spec.timeout)
 	defer cancel()
 
-	command := exec.CommandContext(commandContext, c.executable, c.args(spec)...)
+	args := c.args(spec)
+	if len(c.environment) > 0 {
+		settingsPath, err := writeProviderSettings(c.environment)
+		if err != nil {
+			return claudeResult{}, fmt.Errorf("write Claude provider settings: %w", err)
+		}
+		defer os.RemoveAll(filepath.Dir(settingsPath))
+		args = append(args, "--settings", settingsPath)
+	}
+	command := exec.CommandContext(commandContext, c.executable, args...)
 	// Issue text goes on stdin, never on the command line.
 	command.Stdin = strings.NewReader(spec.prompt)
 	command.Dir = spec.dir
-	command.Env = withoutAPIKeys(os.Environ())
+	command.Env = append(claudeProcessEnv(os.Environ(), c.environment), spec.env...)
 	command.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -193,23 +277,149 @@ func (c claudeCLI) runResult(ctx context.Context, spec claudeRun) (claudeResult,
 		if commandContext.Err() == context.Canceled {
 			return claudeResult{}, fmt.Errorf("Claude command canceled: %w", context.Canceled)
 		}
+		redactedStderr := redactSecrets(stderr.String(), c.environment)
 		if message := claudeErrorMessage(stdout.Bytes()); message != "" {
-			return claudeResult{}, fmt.Errorf("Claude command failed: %s", message)
+			stderrLine := stderrSummary(redactedStderr)
+			transient := transientSubtype(message) || (stderrLine != "" && transientProviderMessage(stderrLine))
+			return claudeResult{}, claudeFailure{message: "Claude command failed: " + message, transient: transient}
 		}
-		if line := stderrSummary(stderr.String()); line != "" {
-			return claudeResult{}, fmt.Errorf("Claude command failed: %s", line)
+		if line := stderrSummary(redactedStderr); line != "" {
+			return claudeResult{}, claudeFailure{message: "Claude command failed: " + line, transient: transientProviderMessage(line)}
 		}
-		return claudeResult{}, fmt.Errorf("Claude command failed")
+		return claudeResult{}, claudeFailure{message: "Claude command failed"}
 	}
 
 	var result claudeResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return claudeResult{}, fmt.Errorf("decode Claude output: %w", err)
+		// A malformed answer may mean the run already did its work, so it is
+		// reported rather than repeated.
+		return claudeResult{}, claudeFailure{message: fmt.Sprintf("decode Claude output: %v", err)}
 	}
 	if result.IsError || result.Subtype != "success" {
-		return claudeResult{}, fmt.Errorf("Claude command failed: %s", result.Subtype)
+		return claudeResult{}, claudeFailure{message: "Claude command failed: " + result.Subtype, transient: transientSubtype(result.Subtype)}
 	}
 	return result, nil
+}
+
+// transientSubtype reports whether a CLI result subtype names a failure that
+// may clear up on a retry. Unknown and deterministic failures are not
+// retried: the run may already have changed the worktree.
+func transientSubtype(subtype string) bool {
+	lower := strings.ToLower(subtype)
+	for _, marker := range []string{"rate_limit", "ratelimit", "overloaded", "unavailable", "timeout"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactSecrets removes provider credentials from text that may reach an
+// error or a log, even if the CLI echoes its environment.
+func redactSecrets(text string, environment []string) string {
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || value == "" {
+			continue
+		}
+		upper := strings.ToUpper(name)
+		if strings.Contains(upper, "TOKEN") || strings.Contains(upper, "KEY") {
+			text = strings.ReplaceAll(text, value, "[redacted]")
+		}
+	}
+	return text
+}
+
+// transientProviderMessage recognizes rate limits, overloads and connection
+// failures in the CLI's first stderr line. Anything unrecognized is reported
+// at once rather than retried blindly.
+func transientProviderMessage(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{
+		"429", "rate limit", "too many requests", "overloaded",
+		"502", "503", "504", "connection reset", "econnreset",
+		"etimedout", "temporarily unavailable", "timeout",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedProviderEnv are the routing variables that always come from the
+// workflow, never from the parent shell. They are removed even in Anthropic
+// mode, so an inherited DeepSeek configuration cannot leak into a run that
+// opted into the CLI's own login.
+var managedProviderEnv = []string{
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"ANTHROPIC_BASE_URL",
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_FOUNDRY",
+}
+
+// claudeProcessEnv builds one agent's environment. The variables the workflow
+// controls are dropped from the parent and replaced by providerEnv, so an
+// inherited Anthropic credential or base URL cannot override the configured
+// provider, and the token only reaches the CLI process and its private
+// settings file.
+func claudeProcessEnv(parent, providerEnv []string) []string {
+	managed := make(map[string]bool, len(managedProviderEnv)+len(providerEnv))
+	for _, name := range managedProviderEnv {
+		managed[name] = true
+	}
+	for _, entry := range providerEnv {
+		if name, _, found := strings.Cut(entry, "="); found {
+			managed[strings.ToUpper(name)] = true
+		}
+	}
+	environment := make([]string, 0, len(parent)+len(providerEnv))
+	for _, entry := range parent {
+		if name, _, found := strings.Cut(entry, "="); found && managed[strings.ToUpper(name)] {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, providerEnv...)
+}
+
+// writeProviderSettings writes the provider environment to a private settings
+// file. A settings env block outranks the process environment, so this is
+// what keeps user, project or local settings from pointing a run at another
+// provider. The file holds the API token, so it lives in a private per-run
+// directory and is removed when the run ends; the token is never logged or
+// passed as an argument value.
+func writeProviderSettings(environment []string) (string, error) {
+	dir, err := os.MkdirTemp("", "jira-ai-agent-provider-")
+	if err != nil {
+		return "", err
+	}
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		if name, value, found := strings.Cut(entry, "="); found {
+			values[name] = value
+		}
+	}
+	content, err := json.Marshal(map[string]map[string]string{"env": values})
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	return path, nil
 }
 
 func (c claudeCLI) args(spec claudeRun) []string {
@@ -274,20 +484,6 @@ func stderrSummary(stderr string) string {
 		line = strings.ToValidUTF8(line[:maxStderrSummary], "") + "..."
 	}
 	return line
-}
-
-// withoutAPIKeys drops Anthropic credentials so the CLI falls back to the
-// logged-in subscription instead of billing an API key.
-func withoutAPIKeys(environment []string) []string {
-	filtered := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.EqualFold(name, "ANTHROPIC_API_KEY") || strings.EqualFold(name, "ANTHROPIC_AUTH_TOKEN") {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
 }
 
 var _ workflow.PRDGenerator = (*ClaudePRDGenerator)(nil)

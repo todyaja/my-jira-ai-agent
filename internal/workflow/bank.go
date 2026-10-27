@@ -39,29 +39,23 @@ var bankAliases = map[string]Status{
 	"frd review":  BankFSDReview,
 }
 
-// Feedback prefixes of the bank documents; the TRD keeps the technical
-// planner's prefix.
-const (
-	RFCFeedbackPrefix           = "!rfc-writer"
-	RFCFeedbackDoneProperty     = "jira-ai-agent.rfc-writer"
-	FSDFeedbackPrefix           = "!fsd-writer"
-	FSDFeedbackDoneProperty     = "jira-ai-agent.fsd-writer"
-	RunbookFeedbackPrefix       = "!runbook-writer"
-	RunbookFeedbackDoneProperty = "jira-ai-agent.runbook-writer"
-)
-
 // RepoSelector resolves the repositories a ticket names.
 type RepoSelector interface {
 	Select(names []string) ([]repos.Repo, error)
 	All() []repos.Repo
 }
 
-// DocumentPublisher files documents in Confluence.
+// DocumentPublisher files documents in Confluence and reads the reviewers'
+// comments on them.
 type DocumentPublisher interface {
 	PublishPageUnder(ctx context.Context, parents []string, title, markdown string) (PublishedPage, error)
 	PageContent(ctx context.Context, title string) (content string, found bool, err error)
 	AttachFile(ctx context.Context, pageID, path string) error
 	AddLabel(ctx context.Context, pageID, label string) error
+	// OpenComments returns the page's comments not applied yet, oldest
+	// first; CloseComment replies to one and marks it applied.
+	OpenComments(ctx context.Context, pageID string) ([]PageComment, error)
+	CloseComment(ctx context.Context, comment PageComment, reply string) error
 }
 
 // PublishedPage is a page in Confluence.
@@ -91,8 +85,14 @@ type BankDependencies struct {
 	Workspace     func(repos.Repo) Workspace
 	Publisher     DocumentPublisher
 	MergeRequests MergeRequestOpener
+	// SQL applies approved SQL migration plans to the development database
+	// at Ready To Implement; nil means none is configured.
+	SQL SQLRunner
 	// Now dates new documents; nil means time.Now.
 	Now func() time.Time
+	// BranchPrefix starts every implementation branch, e.g. "tody/feature";
+	// empty means "feature".
+	BranchPrefix string
 }
 
 func (b BankDependencies) now() time.Time {

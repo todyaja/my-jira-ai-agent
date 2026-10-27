@@ -11,6 +11,24 @@ import (
 const maxClaudeTimeoutSeconds = int64((1<<63 - 1) / int64(time.Second))
 const shellMetacharacters = "&|<>^;()$'\"`"
 
+// The AI providers automated sessions can use. DeepSeek is the default;
+// Anthropic is opt-in so a workflow can never bill the logged-in Claude plan
+// by accident.
+const (
+	ProviderDeepSeek  = "deepseek"
+	ProviderAnthropic = "anthropic"
+)
+
+// DeepSeek's Anthropic-compatible endpoint and the model aliases every run
+// gets. ANTHROPIC_MODEL is the session's default model; the DEFAULT_* entries
+// keep the CLI's opus/sonnet aliases and its background tasks on DeepSeek,
+// and the subagent model does the same for agents the CLI spawns itself.
+const (
+	DefaultDeepSeekBaseURL       = "https://api.deepseek.com/anthropic"
+	DefaultDeepSeekModel         = "deepseek-flash[1m]"
+	DefaultDeepSeekSubagentModel = "deepseek-flash"
+)
+
 func LoadClaudeConfig(getenv func(string) string) (ClaudeConfig, error) {
 	executable := strings.TrimSpace(getenv("CLAUDE_COMMAND"))
 	if executable == "" {
@@ -44,16 +62,84 @@ func LoadClaudeConfig(getenv func(string) string) (ClaudeConfig, error) {
 	if err != nil {
 		return ClaudeConfig{}, err
 	}
+	devDB, err := loadDevDB(getenv)
+	if err != nil {
+		return ClaudeConfig{}, err
+	}
+	provider, err := loadProvider(getenv)
+	if err != nil {
+		return ClaudeConfig{}, err
+	}
+	providerEnv, err := loadProviderEnvironment(getenv, provider)
+	if err != nil {
+		return ClaudeConfig{}, err
+	}
+	// Pin the main model with --model too: that flag outranks both
+	// ANTHROPIC_MODEL and a settings file's model key.
+	model := strings.TrimSpace(getenv("CLAUDE_MODEL"))
+	if model == "" && provider == ProviderDeepSeek {
+		model = DefaultDeepSeekModel
+	}
 
 	return ClaudeConfig{
 		Executable:            executable,
-		Model:                 strings.TrimSpace(getenv("CLAUDE_MODEL")),
+		Model:                 model,
 		Timeout:               timeout,
 		PlanningTimeout:       planningTimeout,
 		ImplementationTimeout: implementationTimeout,
 		ReviewTimeout:         reviewTimeout,
 		AllowedCommands:       allowedCommands,
 		StepModels:            stepModels,
+		DevDB:                 devDB,
+		Provider:              provider,
+		providerEnv:           providerEnv,
+	}, nil
+}
+
+// loadProvider reads CLAUDE_PROVIDER, which defaults to DeepSeek.
+func loadProvider(getenv func(string) string) (string, error) {
+	switch provider := strings.ToLower(strings.TrimSpace(getenv("CLAUDE_PROVIDER"))); provider {
+	case "", ProviderDeepSeek:
+		return ProviderDeepSeek, nil
+	case ProviderAnthropic:
+		return ProviderAnthropic, nil
+	default:
+		return "", fmt.Errorf("CLAUDE_PROVIDER must be %s or %s", ProviderDeepSeek, ProviderAnthropic)
+	}
+}
+
+// loadProviderEnvironment builds the variables every Claude Code process gets.
+// DeepSeek needs its endpoint, model aliases and API token; Anthropic uses the
+// CLI's own login, so it gets no provider environment. A missing DeepSeek key
+// is an error rather than a silent fall back to Anthropic.
+func loadProviderEnvironment(getenv func(string) string, provider string) ([]string, error) {
+	if provider != ProviderDeepSeek {
+		return nil, nil
+	}
+	token := strings.TrimSpace(getenv("DEEPSEEK_API_KEY"))
+	if token == "" {
+		return nil, fmt.Errorf("DEEPSEEK_API_KEY is not configured; automated Claude Code sessions use DeepSeek by default and will not fall back to Anthropic (set CLAUDE_PROVIDER=anthropic to opt in)")
+	}
+	if strings.IndexFunc(token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return nil, fmt.Errorf("DEEPSEEK_API_KEY must be one API key with no spaces or control characters")
+	}
+	return []string{
+		"ANTHROPIC_BASE_URL=" + DefaultDeepSeekBaseURL,
+		"ANTHROPIC_AUTH_TOKEN=" + token,
+		"ANTHROPIC_MODEL=" + DefaultDeepSeekModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=" + DefaultDeepSeekModel,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=" + DefaultDeepSeekModel,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL=" + DefaultDeepSeekSubagentModel,
+		"CLAUDE_CODE_SUBAGENT_MODEL=" + DefaultDeepSeekSubagentModel,
+		// Force the subagent model even if an agent definition names one.
+		"CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1",
+		"CLAUDE_CODE_EFFORT_LEVEL=medium",
+		"CLAUDE_CODE_AUTO_MODE_SERVER=0",
+		// Blank the cloud-provider selectors: they outrank ANTHROPIC_AUTH_TOKEN,
+		// so an inherited or settings-file value would otherwise bypass DeepSeek.
+		"CLAUDE_CODE_USE_BEDROCK=",
+		"CLAUDE_CODE_USE_VERTEX=",
+		"CLAUDE_CODE_USE_FOUNDRY=",
 	}, nil
 }
 

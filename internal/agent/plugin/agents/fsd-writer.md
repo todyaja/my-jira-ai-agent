@@ -15,6 +15,7 @@ Rules:
 - Fill every section of the main table; write "Tidak ada perubahan" where a section truly has no change.
 - Never change anything inside a repository and never check out branches. Write only the FSD's own files where the skill puts them.
 - Do not invent error codes, ids or table names; take them from the code.
+- When the request includes a SQL Migration Plan, describe its table and data changes in the database section.
 
 When the request is a revision, update the same FSD and Word file, keeping its number, and change only what the feedback asks for.
 

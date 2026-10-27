@@ -26,6 +26,10 @@ Follow the TRD's **Implementation Plan** in order. For each step:
 
 If the TRD is wrong or impossible in a detail (a file or function is not as it describes), choose the approach closest to its intent, and report the deviation.
 
+## Database changes
+
+When the request includes an approved SQL migration plan, it is already applied on the development database. Make the code match it exactly, and read the database when you need to confirm a table or row. Never change the database or add SQL scripts to the repository. If the code needs a table, column or row the plan lacks, report it under **Deviations from the TRD** instead of working around it.
+
 ## 3. Verify
 
 Before you finish, run every check listed in the request - typically the test suite, the linter, and the type check or build - and fix what fails. Never weaken, skip or delete a test to make it pass. If a check cannot run (for example a command is refused), say so in the summary rather than claiming it passed.

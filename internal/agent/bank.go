@@ -58,7 +58,47 @@ func parseSections(answer string) []answerSection {
 	return sections
 }
 
-const repoPlannerTools = "Skill,Read,Grep,Glob"
+const repoPlannerTools = "Skill,Read,Grep,Glob,Bash"
+
+// gitReadCommands read any branch of a repository without changing a
+// checkout, and gitExactCommands are allowed only exactly as written. The
+// fetch updates the origin/* branches, so branches pushed by others can be
+// read, but never local branches or files; it takes no arguments because
+// options such as --upload-pack run programs.
+var (
+	gitReadCommands  = []string{"log", "show", "diff", "grep", "ls-tree"}
+	gitExactCommands = []string{"branch -a", "fetch origin", "ls-remote --heads origin"}
+)
+
+// gitReadRules allow the git commands only as "git -C <path> ..." with each
+// repository's exact path: a wildcard before the subcommand would also allow
+// options such as -c, which can run anything.
+func gitReadRules(lists ...[]repos.Repo) []string {
+	rules := []string{}
+	seen := map[string]bool{}
+	for _, list := range lists {
+		for _, repo := range list {
+			path := slashPath(repo.Path)
+			if path == "" || seen[path] {
+				continue
+			}
+			seen[path] = true
+			for _, command := range gitExactCommands {
+				rules = append(rules, "Bash(git -C "+path+" "+command+")")
+			}
+			for _, command := range gitReadCommands {
+				rules = append(rules, "Bash(git -C "+path+" "+command+":*)")
+			}
+		}
+	}
+	return rules
+}
+
+// slashPath writes a path with forward slashes, which the agent's shell
+// keeps as they are; backslashes would be read as escapes.
+func slashPath(path string) string {
+	return strings.ReplaceAll(strings.TrimSpace(path), `\`, "/")
+}
 
 const claudeRepoPlanPrompt = `Write the TRDs for this Jira issue: one overview and one TRD for each repository it changes. Your working directory holds every repository of the team; read the code before proposing anything.
 
@@ -67,6 +107,14 @@ Repositories this issue changes, as checkouts of their base branch (the code imp
 
 Other repositories you may read for context but must not plan changes in:
 %s
+
+The files show one branch only. When work on another branch matters, such as a related feature still unmerged, read it with git, giving -C and the repository path exactly as listed above:
+- git -C <path> fetch origin brings in the remote branches others pushed (exactly this, with no other arguments); run it once per repository before looking for a branch
+- git -C <path> branch -a lists the branches; remote ones are origin/<name>, and git -C <path> ls-remote --heads origin lists what the server has
+- git -C <path> show <branch>:<file> reads a file on a branch
+- git -C <path> ls-tree -r --name-only <branch> lists its files
+- git -C <path> log, diff and grep show and search its history and changes, e.g. git -C <path> diff master...<branch>
+These are the only git commands you can run. Never check out or change a branch.%s
 
 Issue key: %s
 Summary: %s
@@ -84,8 +132,12 @@ Reply in exactly this format, with every marker on its own line:
 (the changed repositories in the order they must merge and deploy, comma separated)
 <<<REPO name | what changes in this repository>>>
 (that repository's TRD in Markdown)
+<<<SQL MIGRATION PLAN>>>
+(the full SQL migration plan in Markdown, as your instructions describe, or exactly "None" when the change needs no database change)
+<<<BRANCH NAME>>>
+(3 to 6 lowercase English words joined by hyphens naming what this issue changes, for the git branch, e.g. bulk-overpayment-withdraw-batch; no ticket code)
 
-Write one REPO section for every repository this issue changes, and no other.`
+Write one REPO section for every repository this issue changes, and no other, and always the SQL MIGRATION PLAN section.`
 
 const claudeRepoPlanRevision = `
 
@@ -94,9 +146,12 @@ Current overview TRD (Confluence storage format):
 
 Current repository TRDs (Confluence storage format):
 %s
+Current SQL migration plan (Confluence storage format; reviewers may have edited the scripts on the page - keep their edits):
+%s
+
 Reviewer feedback, oldest first:
 %s
-Revise the current TRDs for the feedback as the trd-writing skill describes, keep each repository's title, and reply with every section in full.`
+Revise the current TRDs and SQL migration plan for the feedback as the trd-writing skill describes, keep each repository's title, and reply with every section in full.`
 
 // ClaudeRepoPlanner writes the bank workflow's TRDs with the repo-planner
 // agent, run in the folder holding every repository.
@@ -104,6 +159,7 @@ type ClaudeRepoPlanner struct {
 	cli     claudeCLI
 	root    string
 	timeout time.Duration
+	devDB   DevDB
 }
 
 func NewClaudeRepoPlanner(config ClaudeConfig, root string) (*ClaudeRepoPlanner, error) {
@@ -111,16 +167,18 @@ func NewClaudeRepoPlanner(config ClaudeConfig, root string) (*ClaudeRepoPlanner,
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeRepoPlanner{cli: cli, root: root, timeout: timeoutOrDefault(config.PlanningTimeout, DefaultClaudePlanningTimeout)}, nil
+	return &ClaudeRepoPlanner{cli: cli, root: root, timeout: timeoutOrDefault(config.PlanningTimeout, DefaultClaudePlanningTimeout), devDB: config.DevDB}, nil
 }
 
 func (p *ClaudeRepoPlanner) Plan(ctx context.Context, input workflow.PlanInput) (workflow.PlanResult, error) {
 	answer, err := p.cli.run(ctx, claudeRun{
-		agent:   RepoPlannerAgent,
-		tools:   repoPlannerTools,
-		dir:     p.root,
-		prompt:  repoPlanPrompt(input),
-		timeout: p.timeout,
+		agent:        RepoPlannerAgent,
+		tools:        repoPlannerTools,
+		dir:          p.root,
+		prompt:       repoPlanPrompt(input, p.devDB),
+		timeout:      p.timeout,
+		allowedTools: append(gitReadRules(input.Repos, input.AllRepos), p.devDB.rules()...),
+		env:          p.devDB.env(),
 	})
 	if err != nil {
 		return workflow.PlanResult{}, err
@@ -128,16 +186,20 @@ func (p *ClaudeRepoPlanner) Plan(ctx context.Context, input workflow.PlanInput) 
 	return parsePlan(answer)
 }
 
-func repoPlanPrompt(input workflow.PlanInput) string {
+func repoPlanPrompt(input workflow.PlanInput, devDB DevDB) string {
 	revision := ""
 	if len(input.Feedback) > 0 || input.CurrentOverview != "" {
 		var current strings.Builder
 		for _, repo := range input.Current {
 			fmt.Fprintf(&current, "\n[%s - %s]\n%s\n", repo.Repo, repo.Title, repo.TRD)
 		}
-		revision = fmt.Sprintf(claudeRepoPlanRevision, input.CurrentOverview, current.String(), workflow.FormatFeedback(input.Feedback))
+		currentSQL := input.CurrentSQL
+		if strings.TrimSpace(currentSQL) == "" {
+			currentSQL = "(none published)"
+		}
+		revision = fmt.Sprintf(claudeRepoPlanRevision, input.CurrentOverview, current.String(), currentSQL, workflow.FormatFeedback(input.Feedback))
 	}
-	return fmt.Sprintf(claudeRepoPlanPrompt, repoList(input.Repos), contextRepoList(input.AllRepos, input.Repos), input.IssueKey, input.Summary, input.Description, input.RFC, revision)
+	return fmt.Sprintf(claudeRepoPlanPrompt, repoList(input.Repos), contextRepoList(input.AllRepos, input.Repos), devDB.readSection(), input.IssueKey, input.Summary, input.Description, input.RFC, revision)
 }
 
 func parsePlan(answer string) (workflow.PlanResult, error) {
@@ -152,6 +214,10 @@ func parsePlan(answer string) (workflow.PlanResult, error) {
 					result.MergeOrder = append(result.MergeOrder, name)
 				}
 			}
+		case "SQL":
+			result.SQL = section.Body
+		case "BRANCH":
+			result.BranchName = section.Body
 		case "REPO":
 			name, title, _ := strings.Cut(section.Argument, "|")
 			name, title = strings.TrimSpace(name), strings.TrimSpace(title)
@@ -312,7 +378,7 @@ func repoList(list []repos.Repo) string {
 	}
 	lines := make([]string, 0, len(list))
 	for _, repo := range list {
-		lines = append(lines, fmt.Sprintf("- %s: %s (base branch %s)", repo.Name, repo.Path, repo.BaseBranch))
+		lines = append(lines, fmt.Sprintf("- %s: %s (base branch %s)", repo.Name, slashPath(repo.Path), repo.BaseBranch))
 	}
 	return strings.Join(lines, "\n")
 }

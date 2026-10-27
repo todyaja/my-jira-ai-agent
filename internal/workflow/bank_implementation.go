@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,14 @@ const bankRepoContext = `This issue changes these repositories, in merge order: 
 The "PRD" above is the approved RFC for the whole change, and the "TRD" is the overview followed by the TRD for %s.
 
 The application cannot run locally, so verify the change with unit tests only - never start the application or call other systems. In a multi-module Maven project, run only the modules you changed by appending -pl <module path> -am to the test command. Every class or function you add or change must be covered by unit tests. If the repository has no unit tests yet, add the test setup its build tool expects (for Maven, JUnit tests under src/test/java and the test dependencies in pom.xml).`
+
+// bankSQLContext gives the engineer and reviewer the approved SQL migration
+// plan, which the workflow applied on the development database before
+// implementation started.
+const bankSQLContext = `The approved SQL migration plan below is already applied on the development database. The code must match it exactly: table and column names, types, keys and the rows it inserts. Never change the database and never write SQL scripts into the repository; table definitions in the code (such as tables/*.tables.xml) are code and must agree with the plan's DDL. If the code needs something the plan does not have, do not invent it - report it under Deviations from the TRD so the plan is revised.
+
+Approved SQL migration plan (Confluence storage format):
+%s`
 
 type repoImplementation struct {
 	Repo       string         `json:"repo"`
@@ -54,8 +63,9 @@ type bankImplementation struct {
 	Repos []repoImplementation `json:"repos"`
 }
 
-// ExecuteBankReadyToImplement starts a new implement-and-review cycle for
-// every ticked repository and moves the issue to Implementing.
+// ExecuteBankReadyToImplement applies the approved SQL migration plan on the
+// development database, starts a new implement-and-review cycle for every
+// ticked repository and moves the issue to Implementing.
 func ExecuteBankReadyToImplement(ctx context.Context, key string, deps Dependencies) error {
 	fail := failer(deps, "Implementation", key)
 	issue, err := deps.Reader.GetIssue(ctx, key)
@@ -66,9 +76,17 @@ func ExecuteBankReadyToImplement(ctx context.Context, key string, deps Dependenc
 	if err != nil {
 		return fail("select repositories", err)
 	}
+	documents, err := loadDocumentsState(ctx, deps.Reader, key)
+	if err != nil {
+		return fail("load documents", err)
+	}
+	if err := applySQLPlan(ctx, key, deps, documents); err != nil {
+		return fail("apply SQL plan", err)
+	}
+	branch := bankBranch(issue, documents, deps.Bank.BranchPrefix)
 	state := bankImplementation{}
 	for _, repo := range ticked {
-		state.Repos = append(state.Repos, newRepoImplementation(key, repo))
+		state.Repos = append(state.Repos, newRepoImplementation(branch, repo))
 	}
 	if err := saveBankImplementation(ctx, deps.Writer, key, state); err != nil {
 		return fail("save state", err)
@@ -76,7 +94,7 @@ func ExecuteBankReadyToImplement(ctx context.Context, key string, deps Dependenc
 	if err := updateRepositoryStatus(ctx, issue, deps, state); err != nil {
 		return fail("update description", err)
 	}
-	message := fmt.Sprintf("Implementation started on branch %s in %s. The AI engineer and reviewer will iterate for up to %d review rounds per repository.", ImplementationBranch(key), strings.Join(repoNames(ticked), ", "), maxReviewRounds(deps))
+	message := fmt.Sprintf("Implementation started on branch %s in %s. The AI engineer and reviewer will iterate for up to %d review rounds per repository.", branch, strings.Join(repoNames(ticked), ", "), maxReviewRounds(deps))
 	if _, err := deps.Writer.AddComment(ctx, key, jira.TextADF(message)); err != nil {
 		return fail("comment", err)
 	}
@@ -86,8 +104,61 @@ func ExecuteBankReadyToImplement(ctx context.Context, key string, deps Dependenc
 	return nil
 }
 
-func newRepoImplementation(key string, repo repos.Repo) repoImplementation {
-	return repoImplementation{Repo: repo.Name, Branch: ImplementationBranch(key), BaseBranch: repo.BaseBranch, Reviews: []reviewRecord{}}
+func newRepoImplementation(branch string, repo repos.Repo) repoImplementation {
+	return repoImplementation{Repo: repo.Name, Branch: branch, BaseBranch: repo.BaseBranch, Reviews: []reviewRecord{}}
+}
+
+// ticketLine is the description line naming the ticket a branch is for,
+// e.g. "Ticket: CORE-312".
+var ticketLine = regexp.MustCompile(`(?im)^[ \t]*ticket[ \t]*:[ \t]*([a-z][a-z0-9]*-[0-9]+)\b`)
+
+// maxBranchSlug bounds the what-changes part of a branch name.
+const maxBranchSlug = 50
+
+// bankBranch names an issue's implementation branch
+// <prefix>/<ticket>-<what changes>, e.g. tody/feature/core-312-bulk-overpayment-withdraw.
+// The ticket comes from the description's "Ticket:" line, else the issue
+// key; what changes is the TRD planner's branch name, else the summary.
+func bankBranch(issue jira.Issue, documents documentsState, prefix string) string {
+	if prefix = strings.Trim(strings.TrimSpace(prefix), "/"); prefix == "" {
+		prefix = "feature"
+	}
+	ticket := issue.Key
+	if match := ticketLine.FindStringSubmatch(issue.Description); match != nil {
+		ticket = match[1]
+	}
+	slug := ""
+	if documents.TRD != nil {
+		slug = branchSlug(documents.TRD.BranchName)
+	}
+	if slug == "" {
+		slug = branchSlug(issue.Summary)
+	}
+	branch := prefix + "/" + strings.ToLower(ticket)
+	if slug != "" {
+		branch += "-" + slug
+	}
+	return branch
+}
+
+// branchSlug turns text into lowercase words joined by hyphens, cut at a
+// word to at most maxBranchSlug characters.
+func branchSlug(text string) string {
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	slug := ""
+	for _, word := range words {
+		next := word
+		if slug != "" {
+			next = slug + "-" + word
+		}
+		if len(next) > maxBranchSlug {
+			break
+		}
+		slug = next
+	}
+	return slug
 }
 
 type repoOutcome struct {
@@ -194,6 +265,9 @@ func implementRepo(ctx context.Context, key string, deps Dependencies, work bank
 		Branch:      state.Branch,
 		Review:      review,
 		Context:     work.context(repo.Name),
+		// The database may be read but never changed: the approved SQL plan
+		// is already applied.
+		ReadDatabase: true,
 	})
 	if err != nil {
 		logOperationFailure(deps.Logger, "Implementation", key, "implement "+repo.Name, err, time.Since(startedAt))
@@ -466,7 +540,9 @@ type bankWork struct {
 	overview   string
 	repoTRDs   map[string]string
 	mergeOrder []string
-	repos      map[string]repos.Repo
+	// sqlPlan is the approved SQL migration plan page, empty without one.
+	sqlPlan string
+	repos   map[string]repos.Repo
 }
 
 // loadBankWork reads the issue, its documents and its implementation
@@ -501,6 +577,11 @@ func loadBankWork(ctx context.Context, key string, deps Dependencies) (bankWork,
 		}
 	}
 	work.mergeOrder = documents.TRD.MergeOrder
+	if documents.SQL != nil {
+		if work.sqlPlan, err = pageContent(ctx, deps.Bank.Publisher, documents.SQL.Title); err != nil {
+			return work, err
+		}
+	}
 
 	if work.state, err = loadBankImplementation(ctx, deps.Reader, key); err != nil {
 		return work, err
@@ -554,7 +635,11 @@ func (w bankWork) context(repo string) string {
 			order = append(order, state.Repo)
 		}
 	}
-	return fmt.Sprintf(bankRepoContext, strings.Join(order, " -> "), repo, repo)
+	notes := fmt.Sprintf(bankRepoContext, strings.Join(order, " -> "), repo, repo)
+	if strings.TrimSpace(w.sqlPlan) != "" {
+		notes += "\n\n" + fmt.Sprintf(bankSQLContext, w.sqlPlan)
+	}
+	return notes
 }
 
 // updateRepositoryStatus rewrites the repository status table at the end of

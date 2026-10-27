@@ -175,6 +175,7 @@ func buildAgents(getenv func(string) string) (workflowAgents, error) {
 	if err != nil {
 		return workflowAgents{}, err
 	}
+	log.Printf("Claude provider: %s", config.ProviderName())
 	log.Printf("Claude models: %s", describeModels(config))
 	var agents workflowAgents
 	if agents.prd, err = agent.NewClaudePRDGenerator(config); err != nil {
@@ -320,6 +321,9 @@ func describeModels(config agent.ClaudeConfig) string {
 	model := strings.TrimSpace(config.Model)
 	if model == "" {
 		model = "CLI default"
+		if config.ProviderName() == agent.ProviderDeepSeek {
+			model = agent.DefaultDeepSeekModel
+		}
 	}
 	parts := []string{"default=" + model}
 	for _, step := range []string{agent.StepPRD, agent.StepTRD, agent.StepEngineer, agent.StepReviewer, agent.StepRFC, agent.StepFSD, agent.StepRunbook} {

@@ -26,9 +26,13 @@ func newTestTRDGenerator(t *testing.T, mode, repoPath string) *ClaudeTRDGenerato
 	t.Setenv("CLAUDE_TEST_MODE", mode)
 	t.Setenv("CLAUDE_TEST_EXPECT_MODEL", "")
 	t.Setenv("CLAUDE_TEST_EXPECT_DIR", repoPath)
+	t.Setenv("CLAUDE_TEST_EXPECT_PROVIDER", ProviderDeepSeek)
+	t.Setenv("CLAUDE_TEST_EXPECT_TOKEN", testDeepSeekKey)
 	t.Setenv("ANTHROPIC_API_KEY", "must-not-reach-cli")
 
-	generator, err := NewClaudeTRDGenerator(ClaudeConfig{Executable: os.Args[0], PlanningTimeout: 5 * time.Second}, repoPath)
+	config := testClaudeConfig()
+	config.PlanningTimeout = 5 * time.Second
+	generator, err := NewClaudeTRDGenerator(config, repoPath)
 	if err != nil {
 		t.Fatalf("NewClaudeTRDGenerator() error = %v", err)
 	}
@@ -51,7 +55,7 @@ func TestClaudeTRDGeneratorRunsPlannerInRepository(t *testing.T) {
 func TestClaudeTRDGeneratorRejectsMissingRepository(t *testing.T) {
 	for name, repoPath := range map[string]string{"unset": "", "missing": t.TempDir() + "/does-not-exist"} {
 		t.Run(name, func(t *testing.T) {
-			generator, err := NewClaudeTRDGenerator(ClaudeConfig{Executable: os.Args[0]}, repoPath)
+			generator, err := NewClaudeTRDGenerator(testClaudeConfig(), repoPath)
 			if err != nil {
 				t.Fatalf("NewClaudeTRDGenerator() error = %v", err)
 			}
@@ -63,7 +67,7 @@ func TestClaudeTRDGeneratorRejectsMissingRepository(t *testing.T) {
 }
 
 func TestNewClaudeTRDGeneratorResolvesRelativeRepoPath(t *testing.T) {
-	generator, err := NewClaudeTRDGenerator(ClaudeConfig{Executable: os.Args[0]}, ".")
+	generator, err := NewClaudeTRDGenerator(testClaudeConfig(), ".")
 	if err != nil {
 		t.Fatalf("NewClaudeTRDGenerator() error = %v", err)
 	}

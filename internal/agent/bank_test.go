@@ -54,8 +54,8 @@ func TestBankPrompts(t *testing.T) {
 	changed := []repos.Repo{{Name: "bnc_busi", Path: `C:\Codes\bnc_busi_parent\bnc_busi`, BaseBranch: "master"}}
 	all := append([]repos.Repo{{Name: "bnc_iobus", Path: `C:\Codes\bnc_iobus`, BaseBranch: "master"}}, changed...)
 
-	plan := repoPlanPrompt(workflow.PlanInput{IssueKey: "NBS-12", Summary: "Bulk", RFC: "<p>RFC</p>", Repos: changed, AllRepos: all})
-	for _, want := range []string{"implementation starts from):\n- bnc_busi: C:\\Codes\\bnc_busi_parent\\bnc_busi (base branch master)", "must not plan changes in:\n- bnc_iobus", "<p>RFC</p>", "<<<REPO name | what changes"} {
+	plan := repoPlanPrompt(workflow.PlanInput{IssueKey: "NBS-12", Summary: "Bulk", RFC: "<p>RFC</p>", Repos: changed, AllRepos: all}, DevDB{})
+	for _, want := range []string{"implementation starts from):\n- bnc_busi: C:/Codes/bnc_busi_parent/bnc_busi (base branch master)", "must not plan changes in:\n- bnc_iobus", "git -C <path> show <branch>:<file>", "<p>RFC</p>", "<<<REPO name | what changes"} {
 		if !strings.Contains(plan, want) {
 			t.Fatalf("repoPlanPrompt() = %q, want %q", plan, want)
 		}
@@ -63,7 +63,7 @@ func TestBankPrompts(t *testing.T) {
 	if strings.Contains(plan, "Current overview") {
 		t.Fatal("a first plan asked for a revision")
 	}
-	revision := repoPlanPrompt(workflow.PlanInput{CurrentOverview: "<p>old</p>", Current: []workflow.RepoTRD{{Repo: "bnc_busi", Title: "Batch", TRD: "<p>busi</p>"}}, Feedback: []workflow.Feedback{{Text: "use the batch framework"}}})
+	revision := repoPlanPrompt(workflow.PlanInput{CurrentOverview: "<p>old</p>", Current: []workflow.RepoTRD{{Repo: "bnc_busi", Title: "Batch", TRD: "<p>busi</p>"}}, Feedback: []workflow.Feedback{{Text: "use the batch framework"}}}, DevDB{})
 	if !strings.Contains(revision, "[bnc_busi - Batch]\n<p>busi</p>") || !strings.Contains(revision, "use the batch framework") {
 		t.Fatalf("revision prompt = %q", revision)
 	}
@@ -102,7 +102,7 @@ func TestRepoChangesCatchesEdits(t *testing.T) {
 }
 
 func TestDocumentWriterArguments(t *testing.T) {
-	writer, err := NewClaudeDocumentWriter(ClaudeConfig{Executable: os.Args[0]}, `C:\Codes`, []string{`C:\Users\me\.claude\skills`})
+	writer, err := NewClaudeDocumentWriter(testClaudeConfig(), `C:\Codes`, []string{`C:\Users\me\.claude\skills`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestParsePlanJoinsSplitTRDsAndIgnoresFencedMarkers(t *testing.T) {
 }
 
 func TestStepModels(t *testing.T) {
-	env := map[string]string{"CLAUDE_MODEL": "opus", "CLAUDE_FSD_MODEL": " sonnet ", "CLAUDE_RUNBOOK_MODEL": "claude-sonnet-5-5"}
+	env := map[string]string{"DEEPSEEK_API_KEY": testDeepSeekKey, "CLAUDE_MODEL": "opus", "CLAUDE_FSD_MODEL": " sonnet ", "CLAUDE_RUNBOOK_MODEL": "claude-sonnet-5-5"}
 	config, err := LoadClaudeConfig(func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatalf("LoadClaudeConfig() error = %v", err)
@@ -148,7 +148,9 @@ func TestStepModels(t *testing.T) {
 	}
 
 	for _, bad := range []string{"--dangerously-skip-permissions", "sonnet; calc", "son net"} {
-		_, err := LoadClaudeConfig(func(key string) string { return map[string]string{"CLAUDE_FSD_MODEL": bad}[key] })
+		_, err := LoadClaudeConfig(func(key string) string {
+			return map[string]string{"DEEPSEEK_API_KEY": testDeepSeekKey, "CLAUDE_FSD_MODEL": bad}[key]
+		})
 		if err == nil || !strings.Contains(err.Error(), "CLAUDE_FSD_MODEL") {
 			t.Fatalf("LoadClaudeConfig(CLAUDE_FSD_MODEL=%q) error = %v, want it rejected", bad, err)
 		}
@@ -156,7 +158,10 @@ func TestStepModels(t *testing.T) {
 
 	// Each document kind runs on its own model; a step without one keeps
 	// the shared model.
-	writer, err := NewClaudeDocumentWriter(ClaudeConfig{Executable: os.Args[0], Model: "opus", StepModels: map[string]string{StepFSD: "sonnet"}}, `C:\Codes`, nil)
+	writerConfig := testClaudeConfig()
+	writerConfig.Model = "opus"
+	writerConfig.StepModels = map[string]string{StepFSD: "sonnet"}
+	writer, err := NewClaudeDocumentWriter(writerConfig, `C:\Codes`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +171,39 @@ func TestStepModels(t *testing.T) {
 			t.Fatalf("%s writer args = %q, want --model %s", kind, args, want)
 		}
 	}
-	engineer, err := NewClaudeEngineer(ClaudeConfig{Executable: os.Args[0], Model: "opus", StepModels: map[string]string{StepEngineer: "sonnet"}})
+	engineerConfig := testClaudeConfig()
+	engineerConfig.Model = "opus"
+	engineerConfig.StepModels = map[string]string{StepEngineer: "sonnet"}
+	engineer, err := NewClaudeEngineer(engineerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if args := engineer.cli.args(claudeRun{agent: SoftwareEngineerAgent, tools: engineerTools}); !containsPair(args, []string{"--model", "sonnet"}) {
 		t.Fatalf("engineer args = %q, want its own model", args)
+	}
+}
+
+func TestGitReadRulesNameEachRepositoryPath(t *testing.T) {
+	base := repos.Repo{Name: "bnc_busi", Path: `C:\Codes\bnc_busi_parent\bnc_busi-worktrees\base-master`}
+	all := []repos.Repo{{Name: "bnc_iobus", Path: `C:\Codes\bnc_iobus`}, {Name: "bnc_busi", Path: `C:\Codes\bnc_busi_parent\bnc_busi`}}
+	rules := gitReadRules([]repos.Repo{base}, all, []repos.Repo{base})
+	if len(rules) != 3*(len(gitReadCommands)+len(gitExactCommands)) {
+		t.Fatalf("rules = %v, want one set per distinct path", rules)
+	}
+	joined := strings.Join(rules, ",")
+	for _, want := range []string{
+		"Bash(git -C C:/Codes/bnc_busi_parent/bnc_busi-worktrees/base-master show:*)",
+		"Bash(git -C C:/Codes/bnc_iobus branch -a)",
+		"Bash(git -C C:/Codes/bnc_iobus fetch origin)",
+		"Bash(git -C C:/Codes/bnc_busi_parent/bnc_busi diff:*)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("rules = %v, want %s", rules, want)
+		}
+	}
+	for _, rule := range rules {
+		if strings.Contains(rule, "checkout") || strings.Contains(rule, "fetch origin:") || strings.Contains(rule, "* ") || strings.Contains(rule, `\`) {
+			t.Fatalf("rule %q allows more than reading", rule)
+		}
 	}
 }

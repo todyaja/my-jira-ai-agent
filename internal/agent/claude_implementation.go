@@ -81,6 +81,7 @@ type ClaudeEngineer struct {
 	timeout         time.Duration
 	allowedCommands []string
 	checks          checkDetector
+	devDB           DevDB
 }
 
 func NewClaudeEngineer(config ClaudeConfig) (*ClaudeEngineer, error) {
@@ -88,15 +89,16 @@ func NewClaudeEngineer(config ClaudeConfig) (*ClaudeEngineer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeEngineer{cli: cli, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands), checks: newCheckDetector()}, nil
+	return &ClaudeEngineer{cli: cli, timeout: timeoutOrDefault(config.ImplementationTimeout, DefaultClaudeImplementationTimeout), allowedCommands: commandsOrDefault(config.AllowedCommands), checks: newCheckDetector(), devDB: config.DevDB}, nil
 }
 
 // Implement runs the engineer in the worktree. File edits there are accepted
 // automatically and only the worktree's checks and the allowed commands may
-// run.
+// run, plus the read-only development database queries when the workflow
+// asks for them.
 func (e *ClaudeEngineer) Implement(ctx context.Context, input workflow.ImplementInput) (string, error) {
 	checks := e.checks.detect(ctx, input.Dir)
-	return e.cli.run(ctx, claudeRun{
+	run := claudeRun{
 		agent:          SoftwareEngineerAgent,
 		tools:          engineerTools,
 		dir:            input.Dir,
@@ -104,7 +106,13 @@ func (e *ClaudeEngineer) Implement(ctx context.Context, input workflow.Implement
 		timeout:        e.timeout,
 		permissionMode: "acceptEdits",
 		allowedTools:   bashRules(append(checks.all(), e.allowedCommands...)),
-	})
+	}
+	if input.ReadDatabase {
+		run.prompt += e.devDB.readSection()
+		run.allowedTools = append(run.allowedTools, e.devDB.rules()...)
+		run.env = e.devDB.env()
+	}
+	return e.cli.run(ctx, run)
 }
 
 func implementPrompt(input workflow.ImplementInput, checks Checks, commands []string) string {

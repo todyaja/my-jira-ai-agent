@@ -20,12 +20,13 @@ const (
 const (
 	RFCHeading              = "RFC"
 	TRDHeading              = trdHeading
+	SQLHeading              = "SQL MIGRATION PLAN"
 	FSDHeading              = "FSD"
 	RunbookHeading          = "RUNBOOK"
 	RepositoryStatusHeading = "REPOSITORY STATUS"
 )
 
-var managedHeadings = []string{prdHeading, RFCHeading, trdHeading, FSDHeading, RunbookHeading, RepositoryStatusHeading}
+var managedHeadings = []string{prdHeading, RFCHeading, trdHeading, SQLHeading, FSDHeading, RunbookHeading, RepositoryStatusHeading}
 
 // DocumentLink is one labelled link in a managed section.
 type DocumentLink struct {

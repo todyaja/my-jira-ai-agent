@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +10,8 @@ import (
 )
 
 func TestEngineerAndReviewerArguments(t *testing.T) {
-	config := ClaudeConfig{Executable: os.Args[0], AllowedCommands: []string{"npm test", "git diff"}}
+	config := testClaudeConfig()
+	config.AllowedCommands = []string{"npm test", "git diff"}
 	engineer, err := NewClaudeEngineer(config)
 	if err != nil {
 		t.Fatalf("NewClaudeEngineer() error = %v", err)

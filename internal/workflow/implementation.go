@@ -47,6 +47,8 @@ type ImplementInput struct {
 	Review string
 	// Context, when set, adds workflow-specific instructions.
 	Context string
+	// ReadDatabase lets the engineer read the development database.
+	ReadDatabase bool
 }
 
 // Engineer changes the code in a worktree and returns a Markdown summary
